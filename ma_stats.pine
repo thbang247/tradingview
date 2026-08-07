@@ -1,0 +1,346 @@
+//@version=6
+indicator("MA Stats", overlay = false)
+
+// === Display Helpers ===
+table_pos       = position.bottom_right
+size_tbl        = size.small
+align_txt_left  = text.align_left
+align_txt_right = text.align_right
+
+// === Inputs: Lookback Periods ===
+lookback_period_d = input.int(260, "52-Week Lookback (days)",  group = "Lookback")
+lookback_period_w = input.int(52,  "52-Week Lookback (weeks)", group = "Lookback")
+lookback_dist     = input.int(21,  "MA Distance Lookback",     group = "Lookback")
+
+// === Inputs: RS Calculation ===
+instrument_comparison = input.symbol("SPY", "Comparison Instrument",        group = "RS")
+rs_lookback_length    = input.int(50,       "RS Look-back Length", minval=1, group = "RS")
+rs_atr_length         = input.int(20,       "RS ATR Length",                group = "RS")
+rs_avg_length         = input.int(10,       "RS Average Length",             group = "RS")
+rs_consecutive_bars   = input.int(6,        "RS Consecutive Bars for Trend", group = "RS")
+rs_accel_length       = input.int(5,        "RS Acceleration Length",        group = "RS")
+rs_slope_length       = input.int(20,       "RS Slope Length",               group = "RS")
+rs_div_lookback       = input.int(20,       "RS Divergence Lookback",        group = "RS")
+
+// === Inputs: ADR ===
+adr_length_input = input.int(14, "ADR Length", group = "ADR")
+
+// === Inputs: Nasdaq Overlay ===
+nq_scale_daily    = input.int(90, "Nasdaq Scale (Daily)",    group = "Nasdaq")
+nq_scale_intraday = input.int(9,  "Nasdaq Scale (Intraday)", group = "Nasdaq")
+
+// =============================================================================
+// === Moving Averages =========================================================
+// =============================================================================
+ma10  = ta.sma(close, 10)
+ma20  = ta.ema(close, 21)   // Note: This is EMA21, not SMA
+ma50  = ta.sma(close, 50)
+ma150 = ta.sma(close, 150)
+
+if timeframe.isweekly
+    ma20  := ta.sma(close, 4)
+    ma50  := ta.sma(close, 10)
+    ma150 := ta.sma(close, 30)
+
+// Distance from close to each MA (absolute and percentage)
+dist2_10ma   = close - ma10
+dist2_20ma   = close - ma20
+dist2_50ma   = close - ma50
+dist2_150ma  = close - ma150
+
+dist2_10ma_p  = dist2_10ma  / ma10  * 100
+dist2_20ma_p  = dist2_20ma  / ma20  * 100
+dist2_50ma_p  = dist2_50ma  / ma50  * 100
+dist2_150ma_p = dist2_150ma / ma150 * 100
+
+// === 52-Week High Proximity ===
+lookback_period  = timeframe.isweekly ? lookback_period_w : lookback_period_d
+highest_high     = ta.highest(high, lookback_period)
+pct_off_high     = (highest_high - close) / highest_high * 100
+
+// === MA Distance Extremes (for histogram coloring) ===
+highest_dist = ta.highest(dist2_20ma_p, lookback_dist)
+lowest_dist  = ta.lowest(dist2_20ma_p,  lookback_dist)
+
+// Histogram color: green at peak extension, red at trough, otherwise by sign
+var color dist_color = na
+if dist2_20ma_p == highest_dist
+    dist_color := color.new(color.green, 50)
+else if dist2_20ma_p == lowest_dist
+    dist_color := color.new(color.red, 50)
+else if dist2_20ma_p >= 0
+    dist_color := color.rgb(75, 211, 80)
+else
+    dist_color := color.rgb(236, 112, 112)
+
+// =============================================================================
+// === Relative Strength (RS) ==================================================
+// =============================================================================
+// ADR vs ATR note:
+//   ADR (Average Daily Range) = SMA of (high - low) — used for stock volatility scaling
+//   ATR (Average True Range)  = includes gaps — used for RS normalization vs benchmark
+//   They are intentionally different metrics for different purposes.
+
+inst     = request.security(instrument_comparison, "", close)
+inst_atr = request.security(instrument_comparison, "", ta.atr(rs_atr_length))
+
+// Benchmark and stock change, each normalized by their own ATR
+bench_change_norm = (inst - inst[1]) / inst_atr
+stock_change_norm = (close - close[1]) / request.security(syminfo.tickerid, "", ta.atr(rs_atr_length))
+
+// Cumulative ATR-normalized change over the lookback window
+bench_cum_change = math.sum(bench_change_norm, rs_lookback_length)
+stock_cum_change = math.sum(stock_change_norm, rs_lookback_length)
+
+// RS = stock outperformance vs benchmark (positive = outperforming)
+rs     = stock_cum_change - bench_cum_change
+rs_avg = ta.sma(rs, rs_avg_length)
+
+highest_rs = ta.highest(rs, rs_lookback_length)
+lowest_rs  = ta.lowest(rs,  rs_lookback_length)
+
+// === RS Trend Conditions ===
+rs_above = rs > rs_avg
+rs_below = rs < rs_avg
+
+// Allow 1 violation in the last rs_consecutive_bars window (less rigid than all-or-nothing)
+green_count_recent = (rs_above    ? 1 : 0) + (rs_above[1] ? 1 : 0) + (rs_above[2] ? 1 : 0) +
+                     (rs_above[3] ? 1 : 0) + (rs_above[4] ? 1 : 0) + (rs_above[5] ? 1 : 0)
+red_count_recent   = (rs_below    ? 1 : 0) + (rs_below[1] ? 1 : 0) + (rs_below[2] ? 1 : 0) +
+                     (rs_below[3] ? 1 : 0) + (rs_below[4] ? 1 : 0) + (rs_below[5] ? 1 : 0)
+
+green_condition = green_count_recent >= 5  // 5-of-6 above avg
+red_condition   = red_count_recent   >= 5  // 5-of-6 below avg
+
+// =============================================================================
+// === RS Enhancements =========================================================
+// =============================================================================
+
+// --- 1. RS Slope (linear regression slope — direction and magnitude) ---
+// Positive and growing = gaining strength; positive but flattening = stalling
+rs_slope = ta.linreg(rs, rs_slope_length, 0) - ta.linreg(rs, rs_slope_length, 1)
+
+// --- 2. RS Acceleration (rate-of-change of the slope) ---
+// Positive = strength building; negative = fading even if slope still positive
+rs_roc   = rs - rs[rs_accel_length]
+rs_accel = rs_roc - rs_roc[rs_accel_length]
+
+// --- 3. RS Leading Price (IBD concept) ---
+// RS at a new N-bar high while price is still inside the base (>3% off 52w high)
+// Earliest possible signal: stock absorbing supply before the breakout
+rs_leads_price = (highest_rs == rs) and (pct_off_high > 3.0)
+
+// --- 4. RS Pivot Structure (Higher Highs / Higher Lows on the RS line itself) ---
+// 3-bar left/right pivots; ta.pivothigh/low lag 3 bars on confirmation
+rs_ph = ta.pivothigh(rs, 3, 3)
+rs_pl  = ta.pivotlow(rs,  3, 3)
+
+var float rs_last_ph = na
+var float rs_prev_ph = na
+var float rs_last_pl = na
+var float rs_prev_pl = na
+
+if not na(rs_ph)
+    rs_prev_ph := rs_last_ph
+    rs_last_ph := rs_ph
+if not na(rs_pl)
+    rs_prev_pl := rs_last_pl
+    rs_last_pl := rs_pl
+
+rs_hh = not na(rs_last_ph) and not na(rs_prev_ph) and rs_last_ph > rs_prev_ph
+rs_hl = not na(rs_last_pl) and not na(rs_prev_pl) and rs_last_pl > rs_prev_pl
+rs_structure_up = rs_hh and rs_hl
+
+// --- 5. RS Bullish Divergence ---
+// Price at N-bar low while RS does NOT confirm (RS above its own N-bar low)
+// Classic early warning: selling in price not matched in relative terms
+// ta.lowest calls extracted to global scope to avoid conditional-execution warning
+price_lowest_n = ta.lowest(close, rs_div_lookback)
+rs_lowest_n    = ta.lowest(rs,    rs_div_lookback)
+rs_bullish_div = (close == price_lowest_n) and (rs > rs_lowest_n)
+
+// === RS avg line color — incorporates acceleration ===
+// Bright lime  = strong trend AND accelerating (best quality)
+// Green        = strong trend, decelerating
+// Bright red   = weak trend AND accelerating down (worst)
+// Muted red    = weak trend, decelerating
+// Off-white    = neutral / transitioning
+rs_line_color = green_condition and rs_accel > 0 ? color.new(color.lime, 50) : green_condition ? color.new(color.green, 60) : red_condition and rs_accel < 0 ? color.new(color.rgb(255, 50, 50), 50) : red_condition ? color.new(color.red, 60) : color.new(#f7e3e3, 70)
+
+
+// === RS table display values — all computed at global scope (Pine v6 safe) ===
+
+// Slope: bright green when rising fast, dim green when rising slow, same logic for red
+rs_slope_color  = rs_slope > 0.05 ? color.lime : rs_slope > 0 ? color.new(color.green, 40) : rs_slope < -0.05 ? color.rgb(255, 80, 80) : color.new(color.red, 40)
+
+// Acceleration: green only when slope is also positive (real momentum); yellow when
+// accelerating but slope still negative (early turn); red when losing speed
+rs_accel_str    = rs_accel > 0 ? "ACC+" : rs_accel < 0 ? "ACC-" : "ACC~"
+rs_accel_color  = rs_accel > 0 and rs_slope > 0 ? color.lime : rs_accel > 0 and rs_slope <= 0 ? color.yellow : rs_accel < 0 and rs_slope < 0 ? color.rgb(255, 80, 80) : rs_accel < 0 ? color.new(color.orange, 20) : color.gray
+
+// Structure: full green only for HH+HL; split structure gets yellow; LH+LL gets red
+rs_struct_str   = rs_hh and rs_hl ? "HH·HL" : rs_hh ? "HH·LL" : rs_hl ? "LH·HL" : "LH·LL"
+rs_struct_color = rs_hh and rs_hl ? color.lime : rs_hh or rs_hl ? color.yellow : color.new(color.red, 20)
+
+// Signal: LEAD+DIV is the strongest — bright gold; LEAD alone is teal (early, pre-breakout);
+// DIV alone is orange (defensive, holding up under pressure); no signal is dim
+rs_flag_str     = rs_leads_price and rs_bullish_div ? "LEAD+DIV" : rs_leads_price ? "LEAD" : rs_bullish_div ? "DIV" : "-"
+rs_flag_color   = rs_leads_price and rs_bullish_div ? color.rgb(255, 215, 0) : rs_leads_price ? color.new(color.teal, 0) : rs_bullish_div ? color.orange : color.new(color.white, 70)
+
+// =============================================================================
+// === RS Plots ================================================================
+// =============================================================================
+zero_plot   = plot(not timeframe.isintraday ? 0 : na, "ZERO LINE", color.new(color.white, 70))
+rs_plot     = plot(rs, "RS", rs > 0 ? color.green : color.red, linewidth=1, display=display.none)
+rs_avg_plot = plot(rs_avg, "RS Average", color=rs_line_color, linewidth=1)
+
+// RS Leading Price — yellow circle (RS new high while price still in base)
+// Two-tier system vs original single green dot:
+//   Yellow = RS leading (new high + price in base) — actionable early signal
+//   Green  = RS at new high but price also breaking out — confirming, not leading
+plot(rs_leads_price                          ? rs : na, style=plot.style_circles, color=color.yellow,              linewidth=1, title="RS Leads Price")
+plot(highest_rs == rs and not rs_leads_price ? rs : na, style=plot.style_circles, color=color.green,               linewidth=1, title="Highest RS")
+plot(lowest_rs  == rs                        ? rs : na, style=plot.style_circles, color=color.red,                 linewidth=1, title="Lowest RS")
+
+// RS Bullish Divergence — teal dot on zero line (price at low, RS holding up)
+plot(rs_bullish_div  ? 0      : na, style=plot.style_circles, color=color.new(color.teal, 0),  linewidth=1, title="RS Divergence")
+
+// RS Structure Up — aqua dot on RS avg when HH+HL confirmed on RS pivots
+plot(rs_structure_up ? rs_avg : na, style=plot.style_circles, color=color.new(color.aqua, 30), linewidth=1, title="RS Structure Up")
+
+// =============================================================================
+// === Nasdaq Overlay ==========================================================
+// =============================================================================
+nasdaq_close = request.security("IXIC", "D", close)
+
+nq_ma50 = ta.sma(nasdaq_close, 50)
+nq_ma10 = ta.sma(nasdaq_close, 10) - nq_ma50   // offset from MA50 for scaled overlay
+nq_ma20 = ta.ema(nasdaq_close, 21) - nq_ma50
+
+nq_scale = timeframe.isminutes ? nq_scale_intraday : nq_scale_daily
+
+nq_p10 = plot(nq_ma10 / nq_scale, color=#5d606b, display=display.none)
+nq_p21 = plot(nq_ma20 / nq_scale, color=#cfcfa6, display=display.none)
+
+var color nq_fill_color = na
+if timeframe.isintraday
+    nq_fill_color := color.new(color.black, 100)
+else if timeframe.isweekly
+    nq_fill_color := color.new(color.black, 100)
+else if nq_ma10 > nq_ma20
+    nq_fill_color := #58c79c5d
+else
+    nq_fill_color := #fc8989
+
+fill(nq_p10, nq_p21, color=nq_fill_color)
+
+// =============================================================================
+// === ADR (Average Daily Range) ===============================================
+// =============================================================================
+// Use a longer period on intraday timeframes to maintain comparable smoothing.
+// Bug fix: original used `or` (always true); corrected to `and`.
+adr_length = adr_length_input
+if not timeframe.isdaily and not timeframe.isweekly
+    adr_length := int(2.2 * adr_length_input)
+
+adr = ta.sma(high - low, adr_length)
+adr := request.security(syminfo.tickerid, timeframe.period, adr)
+
+// =============================================================================
+// === Data Table — colors and values computed at global scope (Pine v6 safe) ==
+// =============================================================================
+
+// Off 52-week high color
+pct_off_high_color = pct_off_high < 10 ? color.green : pct_off_high < 15 ? color.white : pct_off_high < 20 ? color.yellow : color.red
+
+// 10MA distance colors
+v10adr             = (close - ma10) / adr
+dist2_10ma_p_color = dist2_10ma_p > 3 or dist2_10ma_p < -3 ? color.red : dist2_10ma_p > 0 ? color.green : color.white
+v10adr_color       = v10adr > 3 or v10adr < -3 ? color.red : v10adr > 1 ? color.green : color.white
+
+// 20MA distance colors
+v20adr             = (close - ma20) / adr
+dist2_20ma_p_color = dist2_20ma_p > 4 or dist2_20ma_p < -4 ? color.red : dist2_20ma_p > 0 ? color.green : color.white
+v20adr_color       = v20adr > 4 or v20adr < -4 ? color.red : v20adr > 1 ? color.green : color.white
+
+// 50MA distance colors
+v50adr             = (close - ma50) / adr
+dist2_50ma_p_color = dist2_50ma_p > 0 ? color.green : color.red
+v50adr_color       = v50adr > 7 or v50adr < -7 ? color.red : v50adr > 1 ? color.green : color.white
+
+var data_table = table.new(position.top_right, 6, 22, bgcolor=color.new(color.black, 90), border_width=1, border_color=color.white)
+
+if barstate.islast and not timeframe.isintraday
+    row_num = 0
+
+    // --- Off 52-week High ---
+    table.cell(data_table, 1, row_num, "Off", text_color=pct_off_high_color, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(highest_high - close, "0.00") : str.tostring(highest_high, "0.0000"), text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, str.tostring(pct_off_high, "0.00") + "%", text_color=pct_off_high_color, text_size=size_tbl)
+    table.cell(data_table, 4, row_num, str.tostring((highest_high - close) / adr, "0.00"), text_color=color.white, text_size=size_tbl)
+    table.cell_set_text_halign(data_table, 1, row_num, text_halign=align_txt_left)
+    table.cell_set_text_halign(data_table, 3, row_num, text_halign=align_txt_right)
+    row_num := row_num + 1
+
+    // --- Distance to 10MA ---
+    table.cell(data_table, 1, row_num, "10MA", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(dist2_10ma, "0.00") : str.tostring(dist2_10ma, "0.0000"), text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, str.tostring(dist2_10ma_p, "0.00") + "%", text_color=dist2_10ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 4, row_num, str.tostring(v10adr, "0.00"), text_color=v10adr_color, text_size=size_tbl)
+    table.cell_set_text_halign(data_table, 1, row_num, text_halign=align_txt_left)
+    table.cell_set_text_halign(data_table, 2, row_num, text_halign=align_txt_right)
+    row_num := row_num + 1
+
+    // --- Distance to 20MA (EMA21) ---
+    table.cell(data_table, 1, row_num, "20MA", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(dist2_20ma, "0.00") : str.tostring(dist2_20ma, "0.0000"), text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, str.tostring(dist2_20ma_p, "0.00") + "%", text_color=dist2_20ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 4, row_num, str.tostring(v20adr, "0.00"), text_color=v20adr_color, text_size=size_tbl)
+    table.cell_set_text_halign(data_table, 1, row_num, text_halign=align_txt_left)
+    table.cell_set_text_halign(data_table, 2, row_num, text_halign=align_txt_right)
+    row_num := row_num + 1
+
+    // --- Distance to 50MA ---
+    table.cell(data_table, 1, row_num, "50MA", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(dist2_50ma, "0.00") : str.tostring(dist2_50ma, "0.0000"), text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, str.tostring(dist2_50ma_p, "0.00") + "%", text_color=dist2_50ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 4, row_num, str.tostring(v50adr, "0.00"), text_color=v50adr_color, text_size=size_tbl)
+    table.cell_set_text_halign(data_table, 1, row_num, text_halign=align_txt_left)
+    table.cell_set_text_halign(data_table, 2, row_num, text_halign=align_txt_right)
+    row_num := row_num + 1
+
+    // --- RS Trend Row: slope / acceleration / pivot structure ---
+    table.cell(data_table, 1, row_num, "RS", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, str.tostring(rs_slope, "0.00"), text_color=rs_slope_color, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, rs_accel_str, text_color=rs_accel_color, text_size=size_tbl)
+    table.cell(data_table, 4, row_num, rs_struct_str, text_color=rs_struct_color, text_size=size_tbl)
+    table.cell_set_text_halign(data_table, 1, row_num, text_halign=align_txt_left)
+    table.cell_set_text_halign(data_table, 2, row_num, text_halign=align_txt_right)
+    table.cell_set_text_halign(data_table, 3, row_num, text_halign=align_txt_left)
+    table.cell_set_text_halign(data_table, 4, row_num, text_halign=align_txt_left)
+    row_num := row_num + 1
+
+    // --- RS Signal Row: LEAD / DIV flags ---
+    table.cell(data_table, 1, row_num, "RS Sig", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, rs_flag_str, text_color=rs_flag_color, text_size=size_tbl)
+    table.cell_set_text_halign(data_table, 1, row_num, text_halign=align_txt_left)
+    table.cell_set_text_halign(data_table, 2, row_num, text_halign=align_txt_left)
+    row_num := row_num + 1
+
+// =============================================================================
+// === Background: NDFD Market Condition =======================================
+// =============================================================================
+daily_close_ndfd = request.security("NDFD", "D", close)
+var color bg_color = na
+
+if timeframe.isintraday or timeframe.isdaily
+    if daily_close_ndfd < 10
+        bg_color := color.new(color.green, 90)
+    else if daily_close_ndfd > 85
+        bg_color := color.new(color.red, 90)
+    else
+        bg_color := na
+else
+    bg_color := na
+
+bgcolor(bg_color)

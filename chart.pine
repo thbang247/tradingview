@@ -1,0 +1,367 @@
+//@version=6
+indicator("Charts", "", true)
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Chart
+// ----------------------------------------------------------------------------------------------------------------------------------
+// === Inputs: MA Visibility ===
+MA10              = input.bool(false, "MA 10",           group = "Price")
+MA21              = input.bool(false, "EMA 21",          group = "Price")
+MA50              = input.bool(true,  "MA 50",           group = "Price")
+MA150             = input.bool(false, "MA 150",          group = "Price")
+MA200             = input.bool(false, "MA 200",          group = "Price")
+ema21_bands_input = input.bool(false, "EMA 21 Bands",   group = "Price")
+
+// === Inputs: ADR ===
+adr_length_input = input.int(14, "ADR Length", group = "Action")
+
+isStock = (syminfo.type == "stock")
+
+textColor = color.orange
+
+// Helper function to adjust MA period for weekly timeframe
+adjustForWeekly(ma, period) =>
+    timeframe.isweekly ? ta.sma(close, period) : ma
+
+// Moving Average calculations
+ma10  = adjustForWeekly(ta.sma(close, 10), 4)
+ma20  = adjustForWeekly(ta.ema(close, 21), 4)
+ma50  = adjustForWeekly(ta.sma(close, 50), 10)
+ma150 = adjustForWeekly(ta.sma(close, 150), 30)
+ma200 = adjustForWeekly(ta.sma(close, 200), 40)
+
+// Function to get and color market cap
+getMarketCap() =>
+    totalShares = request.financial(syminfo.tickerid, 'TOTAL_SHARES_OUTSTANDING', 'FQ', ignore_invalid_symbol=true)
+    closePrice = request.security(syminfo.tickerid, "D", close)
+    if na(totalShares) or na(closePrice)
+        ["N/A", na]
+    else
+        marketCap = totalShares * closePrice
+        marketCapStr = if marketCap > 1e9
+            str.tostring(math.round(marketCap / 1e9)) + "B"
+        else if marketCap > 1e6
+            str.tostring(math.round(marketCap / 1e6)) + "M"
+        else
+            str.tostring(math.round(marketCap))
+
+        marketCapColor = if marketCap > 500e9 or marketCap < 100e6
+            color.red
+        else if marketCap > 100e9 or marketCap < 300e6
+            color.yellow
+        else
+            textColor
+
+        [marketCapStr, marketCapColor]
+
+// Function to get shares float and float percentage
+getFloatData() =>
+    sharesFloat = request.financial(syminfo.tickerid, 'FLOAT_SHARES_OUTSTANDING', 'FY', ignore_invalid_symbol=true)
+    closePrice = request.security(syminfo.tickerid, "D", close)
+    totalShares = request.financial(syminfo.tickerid, 'TOTAL_SHARES_OUTSTANDING', 'FQ', ignore_invalid_symbol=true)
+
+    if na(sharesFloat) or na(totalShares) or na(closePrice)
+        ["N/A", "N/A", float(na)]
+    else if sharesFloat > 0 and totalShares > 0
+        floatPercent = sharesFloat / totalShares * 100
+        floatUnit = if sharesFloat > 1e9
+            str.tostring(sharesFloat / 1e9, "#.##") + "B"
+        else if sharesFloat > 1e6
+            str.tostring(sharesFloat / 1e6, "#.##") + "M"
+        else
+            str.tostring(sharesFloat, "#.##")
+
+        [floatUnit, str.tostring(floatPercent, "#.#") + "%", sharesFloat]
+    else
+        ["N/A", "N/A", float(na)]
+
+// Function to calculate ADR percentage with NaN checks
+getADRPercentage() =>
+    adr = ta.sma(high - low, adr_length_input)
+    adr := request.security(syminfo.tickerid, timeframe.period, adr)
+    adrPercentage = (adr / close) * 100
+
+    if adrPercentage > 3.5
+        [str.tostring(adrPercentage, "#.##") + "%", color.green]
+    else if adrPercentage > 2
+        [str.tostring(adrPercentage, "#.##") + "%", color.white]
+    else
+        [str.tostring(adrPercentage, "#.##") + "%", textColor]
+
+// Function to calculate upper and lower bounds using ADR
+getADR() =>
+    used_adr_length = adr_length_input
+    if not timeframe.isdaily and not timeframe.isweekly
+        used_adr_length := int(2.2 * adr_length_input)
+    adr = ta.sma(high - low, used_adr_length)
+    adr := request.security(syminfo.tickerid, timeframe.period, adr)
+
+    adrColor = color.white
+
+    if na(adr)
+        ["N/A", color.white, 0]
+    else
+        [str.tostring(adr, "#.##"), adrColor, adr]
+
+// Function to calculate 21MA ± ATR
+get21MASubtractATR() =>
+    atr = ta.atr(adr_length_input)
+    atr := request.security(syminfo.tickerid, timeframe.period, ta.atr(adr_length_input))
+    result = ma20 - atr
+    if ma20 > close
+        result := ma20 + atr
+
+    if na(result)
+        ["N/A", textColor]
+    else
+        [str.tostring(result, "#.##"), color.white]
+
+// Function to convert dollar volume to K, M, B notation
+// Returns raw vol and averages for color computation at call site
+getAverageDollarVolume() =>
+    sumDollarVolume = 0.0
+    for i = 0 to 9
+        sumDollarVolume := sumDollarVolume + (close[i] * volume[i])
+    avgDollarVolume = sumDollarVolume / 10
+    if timeframe.isminutes
+        avgDollarVolume := sumDollarVolume / 50
+
+    percent_daily_vs_avg10 = 100 * (close * volume) / avgDollarVolume
+
+    if na(avgDollarVolume)
+        ["N/A", percent_daily_vs_avg10]
+
+    var string notation = ""
+    var float value = avgDollarVolume
+
+    if avgDollarVolume >= 1e9
+        value := avgDollarVolume / 1e9
+        notation := "B"
+    else if avgDollarVolume >= 1e6
+        value := avgDollarVolume / 1e6
+        notation := "M"
+    else if avgDollarVolume >= 1e3
+        value := avgDollarVolume / 1e3
+        notation := "K"
+    else
+        notation := ""
+
+    formattedValue = str.tostring(value, "#.##") + notation
+    [formattedValue, percent_daily_vs_avg10]
+
+// =============================================================================
+// === Dollar Volume Color Logic (mirrors Dollar Volume script) =================
+// =============================================================================
+// Hoisted to global scope so series functions run on every bar (Pine v6 requirement).
+vol_current      = close * volume
+vol_avg_50       = ta.sma(vol_current, 50)
+vol_avg_short_10 = ta.sma(vol_current, 10)
+
+getVolBarColor(float bar_vol, float cmp_vol, bool up_day) =>
+    var color c = na
+    if bar_vol < vol_avg_short_10
+        c := color.rgb(255, 255, 255, 52)   // Below short avg: dim white
+    else if bar_vol > cmp_vol
+        if up_day
+            if bar_vol > 5.0 * cmp_vol
+                c := color.rgb(0, 57, 212)  // Up + extreme surge: dark blue
+            else if bar_vol > 2.0 * cmp_vol
+                c := color.aqua             // Up + moderate surge: aqua
+            else
+                c := #75da56               // Up + above avg: green
+        else
+            if bar_vol > 5.0 * cmp_vol
+                c := color.maroon           // Down + extreme surge: maroon
+            else if bar_vol > 2.0 * cmp_vol
+                c := color.rgb(185, 80, 185) // Down + moderate surge: purple
+            else
+                c := #e67771               // Down + above avg: red
+    else
+        c := color.rgb(255, 255, 255, 52)   // Below compare vol: dim white
+    c
+
+//----------------------------------------------------------------------------------------------------------------------------------------
+// Plot MAs at the global scope
+p10  = plot(ma10,  title = 'MA 10',  color=#5d606b,  display = MA10  ? display.pane : display.none)
+p21  = plot(ma20,  title = 'MA 21',  color=#cfcfa6,  display = MA21  ? display.pane : display.none)
+p50  = plot(ma50,  title = 'MA 50',  color=#ffffff,  display = MA50  ? display.pane : display.none)
+p150 = plot(ma150, title = 'MA 150', color=#81e4eb,  display = MA150 ? display.pane : display.none)
+p200 = plot(ma200, title = 'MA 200', color=#b71c1c,  display = MA200 ? display.pane : display.none)
+
+// Helper function to determine fill color
+getFillColor(upperMA, lowerMA, colorUp, colorDown) =>
+    timeframe.isweekly ? color.new(color.black, 100) : (upperMA > lowerMA ? color.new(colorUp, 50) : color.new(colorDown, 50))
+
+// Fill areas between MAs
+fill_color_2110 = if timeframe.isweekly
+    color.new(color.black, 100)
+else if ma10 > ma20
+    #58c79c57
+else
+    #cb3b3b59
+
+fill_color_week = timeframe.isweekly ? (ma50 > ma10 ? color.new(color.rgb(252, 137, 137), 80) : color.new(color.green, 80)) : color.new(color.black, 100)
+fill(p10, p50, color=fill_color_week)
+fill(p10, p21, color=fill_color_2110)
+
+// EMA21 dynamic stdDev bands
+priceDistance = math.abs(close - ma20)
+stdDev20 = ta.stdev(close, 20)
+
+baseMultiplier = 2.0
+maxDistance = 5 * stdDev20
+dynamicMultiplier = baseMultiplier * (1 - math.min(priceDistance / maxDistance, 0.5)) + 0.5
+
+ma20Upper = ma20 + dynamicMultiplier * stdDev20
+ma20Lower = ma20 - dynamicMultiplier * stdDev20
+
+p21Upper = plot(timeframe.isweekly ? na : ma20Upper, color=color.new(color.white, 80), display=ema21_bands_input ? display.pane : display.none, linewidth=1, title="21MA Upper Bounce")
+p21Lower = plot(timeframe.isweekly ? na : ma20Lower, color=color.new(color.white, 80), display=ema21_bands_input ? display.pane : display.none, linewidth=1, title="21MA Lower Bounce")
+
+fill_color_bounce = color.new(color.blue, 90)
+fill(p21Upper, p21Lower, color=fill_color_bounce, display=ema21_bands_input ? display.all : display.none)
+
+// =============================================================================
+// === Price Bar Color =========================================================
+// =============================================================================
+dayRange = high - low
+
+paletteColor = color.rgb(255, 255, 255, 44)
+if high <= high[1] and low >= low[1]
+    paletteColor := color.rgb(255, 255, 255, 11)
+else if close > high - (dayRange * 0.3)
+    paletteColor := #4ccc50
+else if close > high - (dayRange * 0.5)
+    paletteColor := #2186709c
+else if close < low + (dayRange * 0.3)
+    paletteColor := #ee3535
+else if close < low + (dayRange * 0.5)
+    paletteColor := #f7786195
+
+plotbar(close, high, low, close, title = 'Candles', color = paletteColor)
+
+// =============================================================================
+// === Background: NDFD Market Condition =======================================
+// =============================================================================
+dailyCloseNCFD = request.security("NDFD", "D", close)
+var color bgColor = na
+
+if timeframe.isintraday or timeframe.isdaily
+    if dailyCloseNCFD < 10
+        bgColor := color.new(color.green, 90)
+    else if dailyCloseNCFD > 85
+        bgColor := color.new(color.red, 90)
+    else
+        bgColor := na
+else
+    bgColor := na
+
+bgcolor(bgColor)
+
+// =============================================================================
+// === Pre-compute Series Calls at Global Scope ================================
+// =============================================================================
+[adr_pct_result, adr_pct_color] = getADRPercentage()
+[adr_value, adr_color, adr_raw]  = getADR()
+
+// Vol color: compute here at global scope using today's bar vs 50-bar avg
+vol_bar_color = getVolBarColor(vol_current, vol_avg_50, close > close[1])
+
+// =============================================================================
+// === Table: Technical Data ===================================================
+// =============================================================================
+tablePosition = position.top_right
+if timeframe.isminutes
+    tablePosition := position.bottom_right
+tableSize = size.small
+tableBgColor = color.rgb(34, 37, 44, 100)
+
+var table techTable = table.new(tablePosition, 2, 4, bgcolor=tableBgColor)
+
+if barstate.islast and (timeframe.isdaily or timeframe.isweekly)
+    var int rowCount = 0
+
+    [tempMarketCapStr, _] = getMarketCap()
+    if tempMarketCapStr != "N/A"
+        rowCount := rowCount + 1
+    if (timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly)
+        [tempFloatShares, _, _f] = getFloatData()
+        if tempFloatShares != "N/A"
+            rowCount := rowCount + 2
+    rowCount := rowCount + 1  // ADR %
+    rowCount := rowCount + 1  // ADR $
+    rowCount := rowCount + 1  // xADR $
+    rowCount := rowCount + 1  // %ADR
+    rowCount := rowCount + 1  // Pos size
+    rowCount := rowCount + 1  // Size in dollars
+    rowCount := rowCount + 1  // Gain in a week, months
+    rowCount := rowCount + 1  // Average Dollar Volume
+    if not na(syminfo.sector) and isStock
+        rowCount := rowCount + 1
+    if not na(syminfo.industry) and isStock
+        rowCount := rowCount + 1
+
+    table.delete(techTable)
+    techTable := table.new(tablePosition, 2, rowCount, bgcolor=tableBgColor)
+
+    var int currentRow = 0
+
+    // Market Cap
+    [marketCapStr, marketCapColor] = getMarketCap()
+    if marketCapStr != "N/A"
+        table.cell(techTable, 0, currentRow, "Market Cap", text_color=textColor, text_size=tableSize)
+        table.cell(techTable, 1, currentRow, marketCapStr, text_color=marketCapColor, text_size=tableSize)
+        currentRow := currentRow + 1
+
+    // Float
+    if timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly
+        [floatShares, floatPercent, floatRaw] = getFloatData()
+        if floatShares != "N/A"
+            floatColor = not na(floatRaw) and floatRaw < 100e6 ? color.white : textColor
+            table.cell(techTable, 0, currentRow, "Shares Float", text_color=textColor, text_size=tableSize)
+            table.cell(techTable, 1, currentRow, floatShares + " ( " + floatPercent + " )", text_color=floatColor, text_size=tableSize)
+            currentRow := currentRow + 1
+
+    // ADR %
+    if adr_pct_result != "N/A"
+        table.cell(techTable, 0, currentRow, "ADR", text_color=textColor, text_size=tableSize)
+        table.cell(techTable, 1, currentRow, adr_pct_result, text_color=adr_pct_color, text_size=tableSize)
+    else
+        table.cell(techTable, 0, currentRow, "ADR", text_color=textColor, text_size=tableSize)
+        table.cell(techTable, 1, currentRow, "N/A", text_color=textColor, text_size=tableSize)
+    currentRow := currentRow + 1
+
+    // xADR
+    table.cell(techTable, 0, currentRow, "xADR", text_color=color.white, text_size=tableSize)
+    table.cell(techTable, 1, currentRow, "$" + adr_value, text_color=adr_color, text_size=tableSize)
+    currentRow := currentRow + 1
+
+    // %ADR
+    adr_used_pct = math.abs(close - close[1]) / str.tonumber(adr_value) * 100
+    adr_used_pct_color = adr_used_pct > 90 ? color.red : adr_color
+    table.cell(techTable, 0, currentRow, "%ADR", text_color=textColor, text_size=tableSize)
+    table.cell(techTable, 1, currentRow, str.tostring(adr_used_pct, "#.##") + "%", text_color=adr_used_pct_color, text_size=tableSize)
+    currentRow := currentRow + 1
+
+    // Average Dollar Volume — color matches Dollar Volume script bar color
+    [avgDollarVol, percent_daily_vs_avg10] = getAverageDollarVolume()
+    table.cell(techTable, 0, currentRow, "Vol ", text_color=textColor, text_size=tableSize)
+    table.cell(techTable, 1, currentRow, "$" + avgDollarVol + " ( " + str.tostring(percent_daily_vs_avg10, "#") + "% )", text_color=vol_bar_color, text_size=tableSize)
+    currentRow := currentRow + 1
+
+    // Sector
+    if not na(syminfo.sector) and isStock
+        table.cell(techTable, 0, currentRow, "Sector", text_color=textColor, text_size=tableSize)
+        table.cell(techTable, 1, currentRow, syminfo.sector, text_color=textColor, text_size=tableSize)
+        currentRow := currentRow + 1
+
+    // Industry
+    if not na(syminfo.industry) and isStock
+        table.cell(techTable, 0, currentRow, "Ind. Grp", text_color=textColor, text_size=tableSize)
+        table.cell(techTable, 1, currentRow, syminfo.industry, text_color=textColor, text_size=tableSize)
+        currentRow := currentRow + 1
+
+    // Text alignment
+    for row = 0 to rowCount - 1
+        table.cell_set_text_halign(techTable, 0, row, text.align_right)
+        table.cell_set_text_halign(techTable, 1, row, text.align_left)
