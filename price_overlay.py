@@ -1,5 +1,5 @@
 //@version=6
-indicator("Price & Liquidity", "", true)
+indicator("Charts", "", true)
 
 // ----------------------------------------------------------------------------------------------------------------------------------
 // Chart
@@ -77,9 +77,14 @@ adr_pct_color = na(adr_pct) ? textColor : adr_pct > 3.5 ? color.green : adr_pct 
 // =============================================================================
 // Hoisted to global scope so series functions run on every bar (Pine v6 requirement).
 //
-// Volume source mirrors the Dollar Volume script so this table agrees with that
-// pane. Special cases:
-//   IXIC — TVOLQ (Nasdaq composite dollar volume, already in $ terms)
+// This whole block MIRRORS volume.pine. The thresholds and lengths below are
+// hardcoded copies of that script's input DEFAULTS rather than inputs of their
+// own — five more inputs for one table cell was not worth the panel clutter. If
+// those are retuned over there, they must be edited here too or the two panes
+// will silently disagree.
+//
+// Volume source, same substitutions as volume.pine:
+//   IXIC — TVOLQ (Nasdaq composite volume feed; IXIC has no native volume)
 //   GOLD — GLD proxy volume × close (GOLD carries no native volume)
 // request.* resolves for the whole script regardless of which branch runs at
 // runtime, so these sit at global scope rather than inside the ticker tests.
@@ -89,51 +94,70 @@ is_gold = syminfo.ticker == 'GOLD'
 tvolq_close = request.security('TVOLQ', timeframe.period, close,  ignore_invalid_symbol = true)
 gld_volume  = request.security('GLD',   timeframe.period, volume, ignore_invalid_symbol = true)
 
-vol_current      = is_ixic ? tvolq_close : is_gold ? gld_volume * close : close * volume
-vol_avg_50       = ta.sma(vol_current, 50)
-vol_avg_short_10 = ta.sma(vol_current, 10)
+vol_current = is_ixic ? tvolq_close : is_gold ? gld_volume * close : close * volume
 
-// Indices compare against the previous bar instead of the rolling average —
-// index volume feeds carry no meaningful absolute average. Same ticker list as
-// the Dollar Volume script, so the colour here matches the colour there.
-use_prev_bar = syminfo.ticker == 'SPX' or syminfo.ticker == 'IXIC' or syminfo.ticker == 'IWM' or syminfo.ticker == 'ARKK' or syminfo.ticker == 'FFTY'
-compare_vol  = use_prev_bar ? vol_current[1] : vol_avg_50
+// Weekly length switching, previously hardcoded 50/10 here while volume.pine
+// switched to 10/4 — a known divergence that made the two panes report different
+// averages on weekly charts. Now identical.
+avg_len_long  = timeframe.isweekly ? 10 : 50
+avg_len_short = timeframe.isweekly ?  4 : 10
 
-// Today's dollar volume as a multiple of the 10-bar average: 0.98 = just under
-// average, 1.50 = half again above it.
+vol_avg_long  = ta.sma(vol_current, avg_len_long)
+vol_avg_short = ta.sma(vol_current, avg_len_short)
+
+// Short-history fallback: ta.sma is na until its window fills, so on a recent IPO
+// the long average is undefined and every comparison below it silently failed.
+vol_avg = na(vol_avg_long) ? vol_avg_short : vol_avg_long
+
+// --- Relative volume -------------------------------------------------------
+// volume.pine builds this from a matrix profile because it has to work on minute
+// charts, where an offset within the session matters. This table only renders on
+// daily and weekly, where the anchor period is one bar, and there the whole
+// profile collapses to a single trailing average with the current bar excluded.
+// So ta.sma(...)[1] reproduces that pane's number exactly, without the matrix.
 //
-// PERF: the old getAverageDollarVolume() re-derived the 10-bar average with a
-// manual `for i = 0 to 9` loop over close[i] * volume[i], duplicating
-// vol_avg_short_10 which already exists here. It also divided the 10-bar sum by
-// 50 on intraday timeframes (a 5x understatement), and used `var` locals whose
-// initialiser only ran once — leaving a stale value whenever the average fell
-// below 1e3. All of that is gone; the existing series is reused.
-vol_ratio = (na(vol_avg_short_10) or vol_avg_short_10 == 0) ? float(na) : vol_current / vol_avg_short_10
+// The [1] is the point: the old ratio divided by an average that CONTAINED the
+// bar being measured, so a genuine 5x day dragged its own denominator up ~8% and
+// read nearer 4.6x. Excluding it makes "2x" mean 2x, and matches the screener's
+// Relative Volume column.
+rvol_length = 10
+rvol_denom  = ta.sma(vol_current, rvol_length)[1]
 
-getVolBarColor(float bar_vol, float cmp_vol, bool up_day) =>
-    color c = color.rgb(255, 255, 255, 52)
-    if bar_vol < vol_avg_short_10
-        c := color.rgb(255, 255, 255, 52)   // Below short avg: dim white
-    else if bar_vol > cmp_vol
-        if up_day
-            if bar_vol > 5.0 * cmp_vol
-                c := color.rgb(0, 57, 212)  // Up + extreme surge: dark blue
-            else if bar_vol > 2.0 * cmp_vol
-                c := color.aqua             // Up + moderate surge: aqua
-            else
-                c := #75da56               // Up + above avg: green
-        else
-            if bar_vol > 5.0 * cmp_vol
-                c := color.maroon           // Down + extreme surge: maroon
-            else if bar_vol > 2.0 * cmp_vol
-                c := color.rgb(185, 80, 185) // Down + moderate surge: purple
-            else
-                c := #e67771               // Down + above avg: red
+rvol_raw       = (not na(rvol_denom) and rvol_denom > 0) ? vol_current / rvol_denom : float(na)
+fallback_ratio = (not na(vol_avg)   and vol_avg   > 0) ? vol_current / vol_avg      : float(na)
+vol_ratio      = na(rvol_raw) ? fallback_ratio : rvol_raw
+
+// --- Colour ----------------------------------------------------------------
+// Same palette and tiers as volume.pine. There, hue carries relative volume and
+// opacity carries the vs-50-bar-average comparison. Table TEXT cannot use the
+// opacity axis and stay readable, so this cell shows the hue at full opacity —
+// which is exactly how volume.pine renders its own RVol cell.
+C_QUIET  = #8b929c
+C_UP_HI  = #0039d4
+C_UP_MID = #22c3d4
+C_UP_LOW = #75da56
+C_DN_HI  = #8b1a1a
+C_DN_MID = #b950b9
+C_DN_LOW = #e67771
+
+surge_low  = timeframe.isweekly ? 1.5 : 2.0
+surge_high = timeframe.isweekly ? 3.0 : 5.0
+
+getVolBarHue(float ratio, bool is_up, float s_low, float s_high) =>
+    color c = C_QUIET
+    if na(ratio) or ratio < 1.0
+        c := C_QUIET
+    else if is_up
+        c := ratio > s_high ? C_UP_HI : ratio > s_low ? C_UP_MID : C_UP_LOW
     else
-        c := color.rgb(255, 255, 255, 52)   // Below compare vol: dim white
+        c := ratio > s_high ? C_DN_HI : ratio > s_low ? C_DN_MID : C_DN_LOW
     c
 
-vol_bar_color = getVolBarColor(vol_current, compare_vol, close > close[1])
+// REMOVED: the SPX/IXIC/IWM/ARKK/FFTY prev-bar special case. Its rationale was
+// that index volume feeds carry no meaningful absolute average — but a relative
+// ratio is self-normalising against the feed's own history, so indices now take
+// the same path as everything else. Dropped from volume.pine for the same reason.
+vol_bar_color = getVolBarHue(vol_ratio, close > close[1], surge_low, surge_high)
 
 // =============================================================================
 // === String Formatters (no series calls — safe to call inside barstate.islast)
@@ -295,7 +319,7 @@ if barstate.islast and (timeframe.isdaily or timeframe.isweekly)
 
     // Average Dollar Volume — color matches Dollar Volume script bar color
     table.cell(techTable, 0, currentRow, "Vol ", text_color = textColor, text_size = tableSize)
-    table.cell(techTable, 1, currentRow, "$" + fmtDecimal(vol_avg_short_10) + " ( " + (na(vol_ratio) ? "N/A" : str.tostring(vol_ratio, "0.00")) + " )", text_color = vol_bar_color, text_size = tableSize)
+    table.cell(techTable, 1, currentRow, "$" + fmtDecimal(vol_avg_short) + " ( " + (na(vol_ratio) ? "N/A" : str.tostring(vol_ratio, "0.00")) + " )", text_color = vol_bar_color, text_size = tableSize)
     currentRow += 1
 
     // Sector
