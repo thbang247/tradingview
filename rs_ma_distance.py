@@ -34,7 +34,7 @@ adr_length_input = input.int(14, "ADR Length", group = "ADR")
 nq_scale_daily    = input.int(90, "Nasdaq Scale (Daily)",    group = "Nasdaq")
 nq_scale_intraday = input.int(9,  "Nasdaq Scale (Intraday)", group = "Nasdaq")
 // Appended last so it doesn't shift any saved input positions. Divides the
-// HIGQ-LOWQ bar down to roughly the same single-digit range rs lives in — see
+// HIGQ-LOWQ line down to roughly the same single-digit range rs lives in — see
 // the New High/New Low block below for why that matters.
 nhnl_scale        = input.int(10, "New High/Low Scale",      group = "Nasdaq")
 
@@ -169,7 +169,7 @@ rs_accel_color  = rs_accel > 0 and rs_slope > 0 ? color.lime : rs_accel > 0 and 
 // high / low — typically tens to a few hundred, occasionally higher on
 // breadth-thrust days. rs lives in single digits, so plotted directly this
 // would dwarf the RS line exactly the way the raw IXIC MA spread does below —
-// same problem, same fix: divide down by nhnl_scale so the bar sits in a
+// same problem, same fix: divide down by nhnl_scale so the line sits in a
 // comparable range instead of blowing out the pane's scale.
 //
 // nq_hide is defined here, ahead of its other use in the Nasdaq Overlay
@@ -185,9 +185,9 @@ nhnl_diff  = higq_close - lowq_close
 // Blue/orange rather than green/red — this chart already uses green/red for
 // the RS line, the Nasdaq fill, and the table, so a second series on the same
 // two hues would blend into whichever one happens to agree with it that day.
-nhnl_color = nhnl_diff >= 0 ? color.new(#3d8bfd, 65) : color.new(#ff9f43, 65)
+nhnl_color = nhnl_diff >= 0 ? color.new(#3d8bfd, 75) : color.new(#ff9f43, 75)
 
-plot(nq_hide ? na : nhnl_diff / nhnl_scale, title="Nasdaq New High - New Low", style=plot.style_columns, color=nhnl_color)
+plot(nq_hide ? na : nhnl_diff / nhnl_scale, title="Nasdaq New High - New Low", style=plot.style_stepline, color=nhnl_color)
 
 // =============================================================================
 // === RS Plots ================================================================
