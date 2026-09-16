@@ -18,8 +18,8 @@ lookback_dist     = input.int(21,  "MA Distance Lookback",     group = "Lookback
 instrument_comparison = input.symbol("SPY", "Comparison Instrument",        group = "RS")
 rs_lookback_length    = input.int(50,       "RS Look-back Length", minval=1, group = "RS")
 rs_atr_length         = input.int(20,       "RS ATR Length",                group = "RS")
-rs_avg_length         = input.int(10,       "RS Average Length",             group = "RS")
-rs_consecutive_bars   = input.int(6,        "RS Consecutive Bars for Trend", minval=2, group = "RS")
+rs_avg_length         = input.int(10,       "(unused) RS Average Length",    group = "RS")
+rs_consecutive_bars   = input.int(6,        "(unused) RS Consecutive Bars",  minval=2, group = "RS")
 rs_accel_length       = input.int(5,        "RS Acceleration Length",        group = "RS")
 rs_slope_length       = input.int(20,       "RS Slope Length",               group = "RS")
 // Reserved: fed the removed RS Bullish Divergence. Kept declared because deleting
@@ -33,6 +33,10 @@ adr_length_input = input.int(14, "ADR Length", group = "ADR")
 // === Inputs: Nasdaq Overlay ===
 nq_scale_daily    = input.int(90, "Nasdaq Scale (Daily)",    group = "Nasdaq")
 nq_scale_intraday = input.int(9,  "Nasdaq Scale (Intraday)", group = "Nasdaq")
+// Appended last so it doesn't shift any saved input positions. Divides the
+// HIGQ-LOWQ bar down to roughly the same single-digit range rs lives in — see
+// the New High/New Low block below for why that matters.
+nhnl_scale        = input.int(10, "New High/Low Scale",      group = "Nasdaq")
 
 // =============================================================================
 // === Moving Averages =========================================================
@@ -74,11 +78,8 @@ dist2_50ma_p = ma50 != 0 ? dist2_50ma / ma50 * 100 : float(na)
 
 // === 52-Week High Proximity ===
 // BUGFIX: ta.highest(high, 260) is na until 260 bars exist, and na > 3.0 is
-// false — so on any stock with under ~13 months of history pct_off_high was na,
-// the "Off" row read NaN, and rs_leads_price could NEVER fire. That also
-// silently collapsed the two-tier RS-high dots: the green dot is plotted as
-// `highest_rs == rs and not rs_leads_price`, so with the LEAD flag stuck false
-// every RS high rendered green instead of yellow.
+// false — so on any stock with under ~13 months of history pct_off_high was na
+// and the "Off" row read NaN.
 //
 // Fallback is a running high maintained since the first bar — the longest window
 // the history actually supports. Done with a var rather than
@@ -127,27 +128,7 @@ bench_cum_change = math.sum(bench_change_norm, rs_lookback_length)
 stock_cum_change = math.sum(stock_change_norm, rs_lookback_length)
 
 // RS = stock outperformance vs benchmark (positive = outperforming)
-rs     = stock_cum_change - bench_cum_change
-rs_avg = ta.sma(rs, rs_avg_length)
-
-highest_rs = ta.highest(rs, rs_lookback_length)
-lowest_rs  = ta.lowest(rs,  rs_lookback_length)
-
-// === RS Trend Conditions ===
-rs_above = rs > rs_avg
-rs_below = rs < rs_avg
-
-// Allow 1 violation in the last rs_consecutive_bars window (less rigid than
-// all-or-nothing).
-// PERF/BUG: this was a hand-unrolled six-term sum with hard-coded [1]..[5]
-// offsets and a hard-coded `>= 5`, which meant the rs_consecutive_bars input was
-// silently ignored. math.sum is one rolling accumulator instead of six indexed
-// history reads per condition, and it honours the input.
-green_count_recent = math.sum(rs_above ? 1.0 : 0.0, rs_consecutive_bars)
-red_count_recent   = math.sum(rs_below ? 1.0 : 0.0, rs_consecutive_bars)
-
-green_condition = green_count_recent >= rs_consecutive_bars - 1
-red_condition   = red_count_recent   >= rs_consecutive_bars - 1
+rs = stock_cum_change - bench_cum_change
 
 // =============================================================================
 // === RS Enhancements =========================================================
@@ -162,24 +143,10 @@ rs_slope = ta.linreg(rs, rs_slope_length, 0) - ta.linreg(rs, rs_slope_length, 1)
 rs_roc   = rs - rs[rs_accel_length]
 rs_accel = rs_roc - rs_roc[rs_accel_length]
 
-// --- 3. RS Leading Price (IBD concept) ---
-// RS at a new N-bar high while price is still inside the base (>3% off 52w high)
-// Earliest possible signal: stock absorbing supply before the breakout
-rs_leads_price = (highest_rs == rs) and (pct_off_high > 3.0)
-
 // Removed: RS Pivot Structure (HH/HL on the RS line, plotted as the aqua
 // "RS Structure Up" dot and the third RS table cell) and RS Bullish Divergence
 // (teal dot on the zero line). Their calculations went with them — two
 // ta.pivothigh/low calls, four persistent pivot vars, and two ta.lowest windows.
-
-// === RS avg line color — incorporates acceleration ===
-// Bright lime  = strong trend AND accelerating (best quality)
-// Green        = strong trend, decelerating
-// Bright red   = weak trend AND accelerating down (worst)
-// Muted red    = weak trend, decelerating
-// Off-white    = neutral / transitioning
-rs_line_color = green_condition and rs_accel > 0 ? color.new(color.lime, 50) : green_condition ? color.new(color.green, 60) : red_condition and rs_accel < 0 ? color.new(color.rgb(255, 50, 50), 50) : red_condition ? color.new(color.red, 60) : color.new(#f7e3e3, 70)
-
 
 // === RS table display values — all computed at global scope (Pine v6 safe) ===
 
@@ -191,11 +158,36 @@ rs_slope_color  = rs_slope > 0.05 ? color.lime : rs_slope > 0 ? color.new(color.
 rs_accel_str    = rs_accel > 0 ? "ACC+" : rs_accel < 0 ? "ACC-" : "ACC~"
 rs_accel_color  = rs_accel > 0 and rs_slope > 0 ? color.lime : rs_accel > 0 and rs_slope <= 0 ? color.yellow : rs_accel < 0 and rs_slope < 0 ? color.rgb(255, 80, 80) : rs_accel < 0 ? color.new(color.orange, 20) : color.gray
 
-// NOTE: there is deliberately no LEAD table row. rs_leads_price is a single-bar
-// event, and a cell written inside barstate.islast asks "is TODAY the signal day"
-// — true on roughly 2% of bars, so the row read "-" essentially always. The
-// yellow LEAD cross plotted below carries the same information across full
-// history, which is where an event of this kind belongs.
+// =============================================================================
+// === Nasdaq New High - New Low ===============================================
+// =============================================================================
+// Placed, and plotted, before RS Plots and the Nasdaq Overlay below so it
+// draws BEHIND both — Pine has no explicit z-index, draw order is purely
+// call order, later plot()/fill() calls paint over earlier ones.
+//
+// HIGQ / LOWQ are raw daily counts of Nasdaq stocks making a fresh 52-week
+// high / low — typically tens to a few hundred, occasionally higher on
+// breadth-thrust days. rs lives in single digits, so plotted directly this
+// would dwarf the RS line exactly the way the raw IXIC MA spread does below —
+// same problem, same fix: divide down by nhnl_scale so the bar sits in a
+// comparable range instead of blowing out the pane's scale.
+//
+// nq_hide is defined here, ahead of its other use in the Nasdaq Overlay
+// section below, since this block needs it first now. Same guard, same
+// reason in both places: HIGQ/LOWQ/IXIC are daily-resolution, so intraday
+// they'd just be a flat step per session.
+nq_hide = timeframe.isintraday or timeframe.isweekly
+
+higq_close = request.security("HIGQ", "D", close)
+lowq_close = request.security("LOWQ", "D", close)
+nhnl_diff  = higq_close - lowq_close
+
+// Blue/orange rather than green/red — this chart already uses green/red for
+// the RS line, the Nasdaq fill, and the table, so a second series on the same
+// two hues would blend into whichever one happens to agree with it that day.
+nhnl_color = nhnl_diff >= 0 ? color.new(#3d8bfd, 65) : color.new(#ff9f43, 65)
+
+plot(nq_hide ? na : nhnl_diff / nhnl_scale, title="Nasdaq New High - New Low", style=plot.style_columns, color=nhnl_color)
 
 // =============================================================================
 // === RS Plots ================================================================
@@ -208,24 +200,7 @@ rs_accel_color  = rs_accel > 0 and rs_slope > 0 ? color.lime : rs_accel > 0 and 
 rs_hide = timeframe.isintraday
 
 plot(rs_hide ? na : 0,      "ZERO LINE", color.new(color.white, 70))
-plot(rs_hide ? na : rs,     "RS", rs > 0 ? color.green : color.red, linewidth=1, display=display.none)
-plot(rs_hide ? na : rs_avg, "RS Average", color=rs_line_color, linewidth=1)
-
-// RS extremes. LEAD is the earliest and most actionable of the three — RS at a new
-// high while price is still inside the base — so it gets its own SHAPE rather than
-// just its own colour. The other two stayed circles, which meant all three read as
-// identical dots and the one worth acting on had to be picked out by hue alone.
-//   Yellow cross  = RS leading (new high + price still in base) — pre-breakout
-//   Green circle  = RS at new high but price breaking out too — confirming
-//   Red circle    = RS at a new low
-//
-// Drawn with plot() rather than plotshape() purely for size: plotshape bottoms out
-// at size.tiny, whereas plot.style_cross is sized by linewidth down to 1px.
-// linewidth is also editable in the Style tab, so this can be retuned without
-// touching the file.
-plot(not rs_hide and rs_leads_price ? rs : na, title="RS Leads Price", style=plot.style_cross, color=color.yellow, linewidth=2)
-plot(not rs_hide and highest_rs == rs and not rs_leads_price ? rs : na, style=plot.style_circles, color=color.green, linewidth=1, title="Highest RS")
-plot(not rs_hide and lowest_rs  == rs                        ? rs : na, style=plot.style_circles, color=color.red,   linewidth=1, title="Lowest RS")
+plot(rs_hide ? na : rs,     "RS", rs > 0 ? color.green : color.red, linewidth=1)
 
 // =============================================================================
 // === Nasdaq Overlay ==========================================================
@@ -250,7 +225,8 @@ nq_scale = timeframe.isminutes ? nq_scale_intraday : nq_scale_daily
 // ±90 while rs lives in single digits — flattening the RS line into a trace.
 // Feeding the plots na on those timeframes removes the range entirely; na
 // contributes nothing to autoscale, and there was nothing visible to lose.
-nq_hide = timeframe.isintraday or timeframe.isweekly
+// (nq_hide itself is defined above, in the New High/New Low block — same
+// condition, needed there first now.)
 
 nq_p10 = plot(nq_hide ? na : nq_ma10 / nq_scale, color=#5d606b, display=display.none)
 nq_p21 = plot(nq_hide ? na : nq_ma20 / nq_scale, color=#cfcfa6, display=display.none)
