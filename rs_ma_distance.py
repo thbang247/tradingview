@@ -20,8 +20,8 @@ rs_lookback_length    = input.int(50,       "RS Look-back Length", minval=1, gro
 rs_atr_length         = input.int(20,       "RS ATR Length",                group = "RS")
 rs_avg_length         = input.int(10,       "(unused) RS Average Length",    group = "RS")
 rs_consecutive_bars   = input.int(6,        "(unused) RS Consecutive Bars",  minval=2, group = "RS")
-rs_accel_length       = input.int(5,        "RS Acceleration Length",        group = "RS")
-rs_slope_length       = input.int(20,       "RS Slope Length",               group = "RS")
+rs_accel_length       = input.int(5,        "(unused) RS Acceleration Length", group = "RS")
+rs_slope_length       = input.int(20,       "(unused) RS Slope Length",        group = "RS")
 // Reserved: fed the removed RS Bullish Divergence. Kept declared because deleting
 // a mid-list input shifts the saved values of every input after it — here that
 // would silently move your ADR Length and Nasdaq scales onto the wrong slots.
@@ -37,6 +37,14 @@ nq_scale_intraday = input.int(9,  "Nasdaq Scale (Intraday)", group = "Nasdaq")
 // HIGQ-LOWQ line down to roughly the same single-digit range rs lives in — see
 // the New High/New Low block below for why that matters.
 nhnl_scale        = input.int(10, "New High/Low Scale",      group = "Nasdaq")
+
+// === Inputs: Adaptive Color ===
+// Used below to turn the fixed ±N-ADR thresholds on the 10MA/EMA21/50MA rows
+// into per-stock ones, based on each stock's own typical ADR-distance rather
+// than one number applied to every ticker regardless of how far it normally
+// travels from its own MAs.
+adr_green_mult = input.float(0.5, "Adaptive Color: Green Multiplier", minval=0.0, step=0.1, group="Adaptive Color")
+adr_red_mult   = input.float(1.5, "Adaptive Color: Red Multiplier",   minval=0.1, step=0.1, group="Adaptive Color")
 
 // =============================================================================
 // === Moving Averages =========================================================
@@ -133,30 +141,15 @@ rs = stock_cum_change - bench_cum_change
 // =============================================================================
 // === RS Enhancements =========================================================
 // =============================================================================
-
-// --- 1. RS Slope (linear regression slope — direction and magnitude) ---
-// Positive and growing = gaining strength; positive but flattening = stalling
-rs_slope = ta.linreg(rs, rs_slope_length, 0) - ta.linreg(rs, rs_slope_length, 1)
-
-// --- 2. RS Acceleration (rate-of-change of the slope) ---
-// Positive = strength building; negative = fading even if slope still positive
-rs_roc   = rs - rs[rs_accel_length]
-rs_accel = rs_roc - rs_roc[rs_accel_length]
-
-// Removed: RS Pivot Structure (HH/HL on the RS line, plotted as the aqua
-// "RS Structure Up" dot and the third RS table cell) and RS Bullish Divergence
-// (teal dot on the zero line). Their calculations went with them — two
-// ta.pivothigh/low calls, four persistent pivot vars, and two ta.lowest windows.
-
-// === RS table display values — all computed at global scope (Pine v6 safe) ===
-
-// Slope: bright green when rising fast, dim green when rising slow, same logic for red
-rs_slope_color  = rs_slope > 0.05 ? color.lime : rs_slope > 0 ? color.new(color.green, 40) : rs_slope < -0.05 ? color.rgb(255, 80, 80) : color.new(color.red, 40)
-
-// Acceleration: green only when slope is also positive (real momentum); yellow when
-// accelerating but slope still negative (early turn); red when losing speed
-rs_accel_str    = rs_accel > 0 ? "ACC+" : rs_accel < 0 ? "ACC-" : "ACC~"
-rs_accel_color  = rs_accel > 0 and rs_slope > 0 ? color.lime : rs_accel > 0 and rs_slope <= 0 ? color.yellow : rs_accel < 0 and rs_slope < 0 ? color.rgb(255, 80, 80) : rs_accel < 0 ? color.new(color.orange, 20) : color.gray
+// Removed: RS Slope and RS Acceleration (the linreg-slope / rate-of-change-of-
+// slope pair that fed the "RS" table row's two numeric columns and their color
+// logic) — the table row itself is gone, and nothing else read either value.
+//
+// Removed earlier: RS Pivot Structure (HH/HL on the RS line, plotted as the
+// aqua "RS Structure Up" dot and the third RS table cell) and RS Bullish
+// Divergence (teal dot on the zero line). Their calculations went with them —
+// two ta.pivothigh/low calls, four persistent pivot vars, and two ta.lowest
+// windows.
 
 // =============================================================================
 // === Nasdaq New High - New Low ===============================================
@@ -185,7 +178,7 @@ nhnl_diff  = higq_close - lowq_close
 // Blue/orange rather than green/red — this chart already uses green/red for
 // the RS line, the Nasdaq fill, and the table, so a second series on the same
 // two hues would blend into whichever one happens to agree with it that day.
-nhnl_color = nhnl_diff >= 0 ? color.new(#3d8bfd, 75) : color.new(#ff9f43, 75)
+nhnl_color = nhnl_diff >= 0 ? color.new(#3d8bfd, 60) : color.new(#ff9f43, 60)
 
 plot(nq_hide ? na : nhnl_diff / nhnl_scale, title="Nasdaq New High - New Low", style=plot.style_stepline, color=nhnl_color)
 
@@ -259,31 +252,69 @@ adr_ok = not na(adr) and adr != 0
 // Off 52-week high color
 pct_off_high_color = pct_off_high < 10 ? color.green : pct_off_high < 15 ? color.white : pct_off_high < 20 ? color.yellow : color.red
 
-// 10MA distance colors
-v10adr             = adr_ok ? (close - ma10) / adr : float(na)
-dist2_10ma_p_color = dist2_10ma_p > 3 or dist2_10ma_p < -3 ? color.red : dist2_10ma_p > 0 ? color.green : color.white
-v10adr_color       = v10adr > 3 or v10adr < -3 ? color.red : v10adr > 1 ? color.green : color.white
+// 10MA distance colors — adaptive: baseline is this stock's own lookback_period
+// average of |v10adr| (how far it typically sits from its 10MA, in ADRs), so a
+// name that normally runs at 3 ADRs needs to clear a much higher bar than one
+// that normally sits at 0.5 before it reads red. Falls back to a running
+// average since inception while lookback_period bars haven't accumulated yet —
+// same shape as running_high above, just a mean instead of a max, plus a
+// not-na guard that one didn't need since v10adr can be na before adr_ok while
+// high never is.
+v10adr = adr_ok ? (close - ma10) / adr : float(na)
 
-// 20MA distance colors
-v20adr             = adr_ok ? (close - ma20) / adr : float(na)
-dist2_20ma_p_color = dist2_20ma_p > 4 or dist2_20ma_p < -4 ? color.red : dist2_20ma_p > 0 ? color.green : color.white
-v20adr_color       = v20adr > 4 or v20adr < -4 ? color.red : v20adr > 1 ? color.green : color.white
+var float v10adr_run_sum = 0.0
+var int   v10adr_run_n   = 0
+if not na(v10adr)
+    v10adr_run_sum += math.abs(v10adr)
+    v10adr_run_n   += 1
+v10adr_run_avg = v10adr_run_n > 0 ? v10adr_run_sum / v10adr_run_n : float(na)
 
-// 50MA distance colors
-// The percent cell was previously `> 0 ? green : red` — binary, with no extension
-// tier. Under "red = far from entry" that called +40% above the 50MA green, and it
-// contradicted v50adr_color in the same row, which does red out beyond ±7.
-// ±10% continues the 3 → 4 → 10 progression of the rows above. Note this can
-// never truly reconcile with the ADR cell: 7 ADRs on a 5%-ADR name is ~35%, so a
-// flat percentage band and an ADR band disagree by construction.
-v50adr             = adr_ok ? (close - ma50) / adr : float(na)
-dist2_50ma_p_color = dist2_50ma_p > 10 or dist2_50ma_p < -10 ? color.red : dist2_50ma_p > 0 ? color.green : color.white
-v50adr_color       = v50adr > 7 or v50adr < -7 ? color.red : v50adr > 1 ? color.green : color.white
+v10adr_baseline_full = ta.sma(math.abs(v10adr), lookback_period)
+v10adr_baseline      = na(v10adr_baseline_full) ? v10adr_run_avg : v10adr_baseline_full
 
-// Sized to what is actually written: columns 1-4, five rows. (The original 6x22
+v10adr_color       = na(v10adr_baseline) ? color.white : v10adr > v10adr_baseline * adr_red_mult or v10adr < -v10adr_baseline * adr_red_mult ? color.red : v10adr > v10adr_baseline * adr_green_mult ? color.green : color.white
+dist2_10ma_p_color = v10adr_color
+
+// 20MA distance colors — same adaptive approach as 10MA above.
+v20adr = adr_ok ? (close - ma20) / adr : float(na)
+
+var float v20adr_run_sum = 0.0
+var int   v20adr_run_n   = 0
+if not na(v20adr)
+    v20adr_run_sum += math.abs(v20adr)
+    v20adr_run_n   += 1
+v20adr_run_avg = v20adr_run_n > 0 ? v20adr_run_sum / v20adr_run_n : float(na)
+
+v20adr_baseline_full = ta.sma(math.abs(v20adr), lookback_period)
+v20adr_baseline      = na(v20adr_baseline_full) ? v20adr_run_avg : v20adr_baseline_full
+
+v20adr_color       = na(v20adr_baseline) ? color.white : v20adr > v20adr_baseline * adr_red_mult or v20adr < -v20adr_baseline * adr_red_mult ? color.red : v20adr > v20adr_baseline * adr_green_mult ? color.green : color.white
+dist2_20ma_p_color = v20adr_color
+
+// 50MA distance colors — same adaptive approach again. This also retires the
+// old percent/ADR mismatch noted here previously (7 ADRs on a 5%-ADR name is
+// ~35%, so a flat ±10% band and a flat ±7-ADR band could never agree by
+// construction) — the percent cell now just mirrors the ADR cell's color
+// directly, so there is nothing left for them to disagree about.
+v50adr = adr_ok ? (close - ma50) / adr : float(na)
+
+var float v50adr_run_sum = 0.0
+var int   v50adr_run_n   = 0
+if not na(v50adr)
+    v50adr_run_sum += math.abs(v50adr)
+    v50adr_run_n   += 1
+v50adr_run_avg = v50adr_run_n > 0 ? v50adr_run_sum / v50adr_run_n : float(na)
+
+v50adr_baseline_full = ta.sma(math.abs(v50adr), lookback_period)
+v50adr_baseline      = na(v50adr_baseline_full) ? v50adr_run_avg : v50adr_baseline_full
+
+v50adr_color       = na(v50adr_baseline) ? color.white : v50adr > v50adr_baseline * adr_red_mult or v50adr < -v50adr_baseline * adr_red_mult ? color.red : v50adr > v50adr_baseline * adr_green_mult ? color.green : color.white
+dist2_50ma_p_color = v50adr_color
+
+// Sized to what is actually written: columns 1-4, four rows. (The original 6x22
 // allocation was pure over-allocation, not a visual artifact — unset cells are
 // not rendered, so those empty rows drew nothing.)
-var data_table = table.new(position.top_right, 5, 5, bgcolor=color.new(color.black, 90), border_width=1, border_color=color.white)
+var data_table = table.new(position.top_right, 5, 4, bgcolor=color.new(color.black, 90), border_width=1, border_color=color.white)
 
 // Table now renders on every timeframe, including minute charts. It previously
 // carried `and not timeframe.isintraday`, which left the intraday pane showing
@@ -318,21 +349,12 @@ if barstate.islast
     table.cell(data_table, 2, row_num, close > 2 ? str.tostring(dist2_50ma, "0.00") : str.tostring(dist2_50ma, "0.0000"), text_color=color.white, text_size=size_tbl)
     table.cell(data_table, 3, row_num, str.tostring(dist2_50ma_p, "0.00") + "%", text_color=dist2_50ma_p_color, text_size=size_tbl)
     table.cell(data_table, 4, row_num, str.tostring(v50adr, "0.00"), text_color=v50adr_color, text_size=size_tbl)
-    row_num := row_num + 1
-
-    // --- RS Trend Row: slope / acceleration ---
-    table.cell(data_table, 1, row_num, "RS", text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 2, row_num, str.tostring(rs_slope, "0.00"), text_color=rs_slope_color, text_size=size_tbl)
-    table.cell(data_table, 3, row_num, rs_accel_str, text_color=rs_accel_color, text_size=size_tbl)
-    table.cell(data_table, 4, row_num, "", text_color=color.white, text_size=size_tbl)
 
     // Uniform alignment: label column left, all three numeric columns right, so a
     // single column reads straight down. Previously set per row and inconsistently
     // — col 2 was right-aligned on the MA rows but default on the Off row, col 3
     // the reverse, and col 4 never aligned at all, leaving the numbers ragged.
-    // Applied after every cell exists; cell_set_text_halign on an uncreated cell
-    // errors, which is why the RS row writes an empty col 4 above.
-    for r = 0 to 4
+    for r = 0 to 3
         table.cell_set_text_halign(data_table, 1, r, text_halign=align_txt_left)
         table.cell_set_text_halign(data_table, 2, r, text_halign=align_txt_right)
         table.cell_set_text_halign(data_table, 3, r, text_halign=align_txt_right)
