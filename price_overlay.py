@@ -15,6 +15,10 @@ ema21_bands_input = input.bool(false, "EMA 21 Bands",   group = "Price")
 // === Inputs: ADR ===
 adr_length_input = input.int(14, "ADR Length", group = "Action")
 
+// === Inputs: Earnings & Sales ===
+show_earnings_table   = input.bool(true, "Show Earnings & Sales Table", group = "Earnings & Sales")
+earnings_growth_thresh = input.float(30, "Good Growth Threshold (%)",  group = "Earnings & Sales")
+
 isStock = (syminfo.type == "stock")
 
 textColor = color.orange
@@ -53,6 +57,104 @@ shares_float = request.financial(syminfo.tickerid, 'FLOAT_SHARES_OUTSTANDING', '
 
 market_cap   = na(total_shares) ? float(na) : total_shares * close
 float_pct    = (na(shares_float) or na(total_shares) or total_shares <= 0 or shares_float <= 0) ? float(na) : shares_float / total_shares * 100
+
+// =============================================================================
+// === Earnings & Sales History =================================================
+// =============================================================================
+// request.earnings() updates on the bar a report is PUBLISHED; request.financial()
+// updates on the bar the NEXT fiscal period BEGINS — different timing rules, so
+// EPS and Revenue are tracked as two independent rolling histories rather than
+// assumed to land on the same bar. Rows are matched by recency (newest with
+// newest), not by a shared report date.
+//
+// Keeps 6 entries, not 4: the oldest DISPLAYED row still needs a prior value to
+// compute its own QoQ growth against, so one extra slot is kept internally and
+// never shown in the table.
+eps_actual  = request.earnings(syminfo.tickerid, earnings.actual, ignore_invalid_symbol = true)
+eps_forward = earnings.future_eps
+rev_actual  = request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ", ignore_invalid_symbol = true)
+rev_forward = earnings.future_revenue
+
+var array<float> eps_hist      = array.new_float(0)
+var array<int>   eps_hist_time = array.new_int(0)
+eps_new = not na(eps_actual) and (na(eps_actual[1]) or eps_actual != eps_actual[1])
+if eps_new
+    array.unshift(eps_hist, eps_actual)
+    array.unshift(eps_hist_time, time)
+    if array.size(eps_hist) > 6
+        array.pop(eps_hist)
+        array.pop(eps_hist_time)
+
+var array<float> rev_hist = array.new_float(0)
+rev_new = not na(rev_actual) and (na(rev_actual[1]) or rev_actual != rev_actual[1])
+if rev_new
+    array.unshift(rev_hist, rev_actual)
+    if array.size(rev_hist) > 6
+        array.pop(rev_hist)
+
+// Net margin — TradingView provides this as its own field (NET_MARGIN) rather
+// than net income and revenue needing to be fetched and divided separately.
+// No forward/estimate equivalent exists for margin the way there does for EPS
+// and Revenue, so the Forward row's margin cell is always "N/A" below — that's
+// a real data gap, not a bug.
+net_margin = request.financial(syminfo.tickerid, "NET_MARGIN", "FQ", ignore_invalid_symbol = true)
+
+var array<float> margin_hist = array.new_float(0)
+margin_new = not na(net_margin) and (na(net_margin[1]) or net_margin != net_margin[1])
+if margin_new
+    array.unshift(margin_hist, net_margin)
+    if array.size(margin_hist) > 6
+        array.pop(margin_hist)
+
+// Returns [QoQ growth %, color] for history index i (0 = latest). na/white if
+// that slot isn't filled yet (recent IPO, thin coverage) or there's no earlier
+// entry to compare against.
+histRow(array<float> hist, int i, float threshold) =>
+    float val    = array.size(hist) > i     ? array.get(hist, i)     : float(na)
+    float prev   = array.size(hist) > i + 1 ? array.get(hist, i + 1) : float(na)
+    float growth = (na(val) or na(prev) or prev == 0) ? float(na) : (val - prev) / math.abs(prev) * 100
+    color c      = na(growth) ? color.white : growth >= threshold ? color.green : growth < 0 ? color.red : color.white
+    [growth, c]
+
+// Margin gets its own rule: the RAW value is what's shown (it's already a
+// percentage, not something to take a growth-rate OF), colored by whether it
+// expanded or contracted vs. the prior quarter — not histRow's 30%-relative-
+// growth bar, which a margin rarely clears either way even on an ordinary
+// quarter, and would leave this column reading white almost always.
+marginRow(array<float> hist, int i) =>
+    float val  = array.size(hist) > i     ? array.get(hist, i)     : float(na)
+    float prev = array.size(hist) > i + 1 ? array.get(hist, i + 1) : float(na)
+    color c    = (na(val) or na(prev)) ? color.white : val >= prev ? color.green : color.red
+    [val, c]
+
+rowLabel(array<int> times, int i) =>
+    array.size(times) > i ? str.format_time(array.get(times, i), "MMM yy") : "Q-" + str.tostring(i)
+
+[eps_g0, eps_c0] = histRow(eps_hist, 0, earnings_growth_thresh)
+[eps_g1, eps_c1] = histRow(eps_hist, 1, earnings_growth_thresh)
+[eps_g2, eps_c2] = histRow(eps_hist, 2, earnings_growth_thresh)
+[eps_g3, eps_c3] = histRow(eps_hist, 3, earnings_growth_thresh)
+
+[rev_g0, rev_c0] = histRow(rev_hist, 0, earnings_growth_thresh)
+[rev_g1, rev_c1] = histRow(rev_hist, 1, earnings_growth_thresh)
+[rev_g2, rev_c2] = histRow(rev_hist, 2, earnings_growth_thresh)
+[rev_g3, rev_c3] = histRow(rev_hist, 3, earnings_growth_thresh)
+
+[margin_v0, margin_c0] = marginRow(margin_hist, 0)
+[margin_v1, margin_c1] = marginRow(margin_hist, 1)
+[margin_v2, margin_c2] = marginRow(margin_hist, 2)
+[margin_v3, margin_c3] = marginRow(margin_hist, 3)
+
+// Forward row: growth is the forward estimate vs. the latest ACTUAL (index 0) —
+// "is the company guided/expected to keep accelerating from what it just
+// reported," not vs. another estimate.
+eps_fwd_prev   = array.size(eps_hist) > 0 ? array.get(eps_hist, 0) : float(na)
+eps_fwd_growth = (na(eps_forward) or na(eps_fwd_prev) or eps_fwd_prev == 0) ? float(na) : (eps_forward - eps_fwd_prev) / math.abs(eps_fwd_prev) * 100
+eps_fwd_color  = na(eps_fwd_growth) ? color.white : eps_fwd_growth >= earnings_growth_thresh ? color.green : eps_fwd_growth < 0 ? color.red : color.white
+
+rev_fwd_prev   = array.size(rev_hist) > 0 ? array.get(rev_hist, 0) : float(na)
+rev_fwd_growth = (na(rev_forward) or na(rev_fwd_prev) or rev_fwd_prev == 0) ? float(na) : (rev_forward - rev_fwd_prev) / math.abs(rev_fwd_prev) * 100
+rev_fwd_color  = na(rev_fwd_growth) ? color.white : rev_fwd_growth >= earnings_growth_thresh ? color.green : rev_fwd_growth < 0 ? color.red : color.white
 
 // =============================================================================
 // === ADR =====================================================================
@@ -252,3 +354,62 @@ if barstate.islast and (timeframe.isdaily or timeframe.isweekly)
     for row = 0 to currentRow - 1
         table.cell_set_text_halign(techTable, 0, row, text.align_right)
         table.cell_set_text_halign(techTable, 1, row, text.align_left)
+
+// =============================================================================
+// === Table: Earnings & Sales ==================================================
+// =============================================================================
+// Anchored bottom_right so it sits below the technical-data table above
+// (top_right) — Pine tables only snap to 9 fixed positions, there's no manual
+// stacking, so this is how "underneath the existing table" is achieved.
+//
+// Green/red per Bang: QoQ growth >= earnings_growth_thresh (default 30%) reads
+// green, anything short of that (including a decline) reads red. Same rule
+// for the Forward row, just measured against the latest actual instead of
+// another quarter.
+var table earnTable = table.new(position.bottom_right, 4, 6, bgcolor = tableBgColor)
+
+if show_earnings_table and barstate.islast and (timeframe.isdaily or timeframe.isweekly) and isStock
+    table.cell(earnTable, 0, 0, "Qtr", text_color = textColor, text_size = tableSize)
+    table.cell(earnTable, 1, 0, "EPS",  text_color = textColor, text_size = tableSize)
+    table.cell(earnTable, 2, 0, "Sales", text_color = textColor, text_size = tableSize)
+    table.cell(earnTable, 3, 0, "Margin", text_color = textColor, text_size = tableSize)
+
+    // Forward — estimate for the next, not-yet-reported quarter. No forward
+    // margin field exists on TradingView, so that cell is always N/A.
+    table.cell(earnTable, 0, 1, "Fwd", text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 1, na(eps_fwd_growth) ? "N/A" : str.tostring(eps_fwd_growth, "0") + "%", text_color = eps_fwd_color, text_size = tableSize)
+    table.cell(earnTable, 2, 1, na(rev_fwd_growth) ? "N/A" : str.tostring(rev_fwd_growth, "0") + "%", text_color = rev_fwd_color, text_size = tableSize)
+    table.cell(earnTable, 3, 1, "N/A", text_color = color.white, text_size = tableSize)
+
+    // Latest reported quarter through 3 quarters back
+    table.cell(earnTable, 0, 2, rowLabel(eps_hist_time, 0), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 2, na(eps_g0) ? "N/A" : str.tostring(eps_g0, "0") + "%", text_color = eps_c0, text_size = tableSize)
+    table.cell(earnTable, 2, 2, na(rev_g0) ? "N/A" : str.tostring(rev_g0, "0") + "%", text_color = rev_c0, text_size = tableSize)
+    table.cell(earnTable, 3, 2, na(margin_v0) ? "N/A" : str.tostring(margin_v0, "0") + "%", text_color = margin_c0, text_size = tableSize)
+
+    table.cell(earnTable, 0, 3, rowLabel(eps_hist_time, 1), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 3, na(eps_g1) ? "N/A" : str.tostring(eps_g1, "0") + "%", text_color = eps_c1, text_size = tableSize)
+    table.cell(earnTable, 2, 3, na(rev_g1) ? "N/A" : str.tostring(rev_g1, "0") + "%", text_color = rev_c1, text_size = tableSize)
+    table.cell(earnTable, 3, 3, na(margin_v1) ? "N/A" : str.tostring(margin_v1, "0") + "%", text_color = margin_c1, text_size = tableSize)
+
+    table.cell(earnTable, 0, 4, rowLabel(eps_hist_time, 2), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 4, na(eps_g2) ? "N/A" : str.tostring(eps_g2, "0") + "%", text_color = eps_c2, text_size = tableSize)
+    table.cell(earnTable, 2, 4, na(rev_g2) ? "N/A" : str.tostring(rev_g2, "0") + "%", text_color = rev_c2, text_size = tableSize)
+    table.cell(earnTable, 3, 4, na(margin_v2) ? "N/A" : str.tostring(margin_v2, "0") + "%", text_color = margin_c2, text_size = tableSize)
+
+    table.cell(earnTable, 0, 5, rowLabel(eps_hist_time, 3), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 5, na(eps_g3) ? "N/A" : str.tostring(eps_g3, "0") + "%", text_color = eps_c3, text_size = tableSize)
+    table.cell(earnTable, 2, 5, na(rev_g3) ? "N/A" : str.tostring(rev_g3, "0") + "%", text_color = rev_c3, text_size = tableSize)
+    table.cell(earnTable, 3, 5, na(margin_v3) ? "N/A" : str.tostring(margin_v3, "0") + "%", text_color = margin_c3, text_size = tableSize)
+
+    for earnRow = 0 to 5
+        table.cell_set_text_halign(earnTable, 0, earnRow, text.align_right)
+        table.cell_set_text_halign(earnTable, 1, earnRow, text.align_left)
+        table.cell_set_text_halign(earnTable, 2, earnRow, text.align_left)
+        table.cell_set_text_halign(earnTable, 3, earnRow, text.align_left)
+else if barstate.islast
+    // Backstop on top of the condition above (which already means no cell is
+    // ever written on intraday): clears out whatever the table last held if the
+    // person switches FROM daily/weekly TO intraday mid-session, rather than
+    // relying only on "never populated" for a table object that already exists.
+    table.clear(earnTable, 0, 0, 3, 5)
