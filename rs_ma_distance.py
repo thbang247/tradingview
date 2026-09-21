@@ -33,18 +33,40 @@ adr_length_input = input.int(14, "ADR Length", group = "ADR")
 // === Inputs: Nasdaq Overlay ===
 nq_scale_daily    = input.int(90, "Nasdaq Scale (Daily)",    group = "Nasdaq")
 nq_scale_intraday = input.int(9,  "Nasdaq Scale (Intraday)", group = "Nasdaq")
-// Appended last so it doesn't shift any saved input positions. Divides the
-// HIGQ-LOWQ line down to roughly the same single-digit range rs lives in — see
-// the New High/New Low block below for why that matters.
-nhnl_scale        = input.int(10, "New High/Low Scale",      group = "Nasdaq")
+// Appended last so it doesn't shift any saved input positions. Multiplies
+// (breadth_ratio - 1) up to roughly the same single-digit range rs lives in —
+// see the S&P 500 Breadth Ratio block below for why that's a multiply now,
+// not the divide the old New High/New Low line needed.
+breadth_scale     = input.float(30, "Breadth Ratio Scale",   group = "Nasdaq")
+// Buy/extreme thresholds on the RAW ratio (S5FI/S5TH), not the scaled plot —
+// per Bang's own framework: ratio < 0.5 is a contrarian buy zone (short-term
+// breadth washed out under an intact long-term trend), < 0.2 is extreme.
+breadth_buy_ratio     = input.float(0.5, "Breadth Buy Threshold",     group = "Nasdaq")
+breadth_extreme_ratio = input.float(0.2, "Breadth Extreme Threshold", group = "Nasdaq")
 
 // === Inputs: Adaptive Color ===
 // Used below to turn the fixed ±N-ADR thresholds on the 10MA/EMA21/50MA rows
 // into per-stock ones, based on each stock's own typical ADR-distance rather
 // than one number applied to every ticker regardless of how far it normally
 // travels from its own MAs.
-adr_green_mult = input.float(0.5, "Adaptive Color: Green Multiplier", minval=0.0, step=0.1, group="Adaptive Color")
-adr_red_mult   = input.float(1.5, "Adaptive Color: Red Multiplier",   minval=0.1, step=0.1, group="Adaptive Color")
+//
+// Two-zone scheme: adr_red_mult x baseline is "full scale" (fully extended for
+// this stock). adr_green_pct is what fraction of that counts as still a good
+// entry — default 80%, so 0-80% of full scale reads green, beyond it reads
+// red. No neutral zone in between by design; a stock is either within its
+// normal entry range for its own typical extension, or past it.
+adr_green_pct = input.float(0.8, "Adaptive Color: Green Zone (% of Full Scale)", minval=0.0, maxval=1.0, step=0.05, group="Adaptive Color")
+adr_red_mult   = input.float(1.5, "Adaptive Color: Red Multiplier (Full Scale)", minval=0.1, step=0.1, group="Adaptive Color")
+// Each MA row's baseline lookback is its OWN period x this multiplier, not one
+// shared window — a 260-day lookback is ~26x the 10MA's own period but only
+// ~5x the 50MA's, so the same window left the 10MA baseline much slower to
+// reflect a change in the stock's behavior than the 50MA one, relative to what
+// each row is actually measuring. Default 5x keeps the 50MA row close to its
+// old fixed 260-day baseline while giving the 10MA/21MA rows a window
+// proportional to their own, faster-moving period. Off-high is unaffected —
+// it stays on lookback_period, since "52-week high" is a 52-week concept by
+// definition already.
+adr_baseline_mult = input.int(5, "Adaptive Baseline: Lookback (x MA period)", minval=1, group="Adaptive Color")
 
 // =============================================================================
 // === Moving Averages =========================================================
@@ -65,9 +87,10 @@ adr_red_mult   = input.float(1.5, "Adaptive Color: Red Multiplier",   minval=0.1
 // means.
 len10 = timeframe.isweekly ?  4 : 10
 len50 = timeframe.isweekly ? 10 : 50
+len20 = timeframe.isweekly ?  4 : 21   // named to match len10/len50, used by ma20 below and by its adaptive baseline lookback
 
 ma10 = ta.sma(close, len10)
-ma20 = timeframe.isweekly ? ta.sma(close, 4) : ta.ema(close, 21)   // EMA21 on daily, SMA4 on weekly
+ma20 = timeframe.isweekly ? ta.sma(close, len20) : ta.ema(close, len20)   // EMA21 on daily, SMA4 on weekly
 
 // Fallback: ta.sma yields na until its window fills, so on a recent IPO the
 // 50MA is undefined for the first 49 bars and every 50MA cell reads NaN. Reuses
@@ -152,35 +175,43 @@ rs = stock_cum_change - bench_cum_change
 // windows.
 
 // =============================================================================
-// === Nasdaq New High - New Low ===============================================
+// === S&P 500 Breadth Ratio (% > 50MA / % > 200MA) ============================
 // =============================================================================
 // Placed, and plotted, before RS Plots and the Nasdaq Overlay below so it
 // draws BEHIND both — Pine has no explicit z-index, draw order is purely
 // call order, later plot()/fill() calls paint over earlier ones.
 //
-// HIGQ / LOWQ are raw daily counts of Nasdaq stocks making a fresh 52-week
-// high / low — typically tens to a few hundred, occasionally higher on
-// breadth-thrust days. rs lives in single digits, so plotted directly this
-// would dwarf the RS line exactly the way the raw IXIC MA spread does below —
-// same problem, same fix: divide down by nhnl_scale so the line sits in a
-// comparable range instead of blowing out the pane's scale.
+// S5FI / S5TH are TradingView's real percent-of-S&P-500-above-MA series (0-100
+// range), not raw counts like the HIGQ/LOWQ pair this replaced. The ratio
+// itself is centered on 1 (equal participation at both horizons), so it's
+// plotted as (ratio - 1): zero means "no divergence between short- and
+// long-term breadth," positive means more of the index is above its 50MA than
+// its 200MA (short-term participation outrunning the long-term trend),
+// negative the reverse (short-term breadth deteriorating under an intact
+// long-term trend — often an early warning). (ratio - 1) is typically a small
+// fraction, the opposite problem HIGQ-LOWQ had — so breadth_scale now
+// multiplies it UP to sit in the same single-digit range rs lives in, instead
+// of dividing a too-large number down.
 //
 // nq_hide is defined here, ahead of its other use in the Nasdaq Overlay
 // section below, since this block needs it first now. Same guard, same
-// reason in both places: HIGQ/LOWQ/IXIC are daily-resolution, so intraday
+// reason in both places: S5FI/S5TH/IXIC are daily-resolution, so intraday
 // they'd just be a flat step per session.
 nq_hide = timeframe.isintraday or timeframe.isweekly
 
-higq_close = request.security("HIGQ", "D", close)
-lowq_close = request.security("LOWQ", "D", close)
-nhnl_diff  = higq_close - lowq_close
+sp_above_50  = request.security("S5FI", "D", close)
+sp_above_200 = request.security("S5TH", "D", close)
+breadth_ratio = sp_above_200 != 0 ? sp_above_50 / sp_above_200 : float(na)
 
-// Blue/orange rather than green/red — this chart already uses green/red for
-// the RS line, the Nasdaq fill, and the table, so a second series on the same
-// two hues would blend into whichever one happens to agree with it that day.
-nhnl_color = nhnl_diff >= 0 ? color.new(#3d8bfd, 60) : color.new(#ff9f43, 60)
+// Color now reflects the actual signal, not just which side of 1.0 the ratio
+// sits on: ratio < buy_threshold means short-term breadth has washed out well
+// below the long-term trend — a contrarian buy zone, stronger the lower it
+// goes, not simply "bad." Below buy_threshold overrides the plain above/
+// below-1 blue/orange split; at or above it, that split is all that's left to
+// go on, so it stays as the fallback.
+breadth_color = na(breadth_ratio) ? color.new(color.white, 60) : breadth_ratio < breadth_extreme_ratio ? #00ff7f : breadth_ratio < breadth_buy_ratio ? color.new(#2f9e4f, 30) : breadth_ratio >= 1 ? color.new(#3d8bfd, 60) : color.new(#ff9f43, 60)
 
-plot(nq_hide ? na : nhnl_diff / nhnl_scale, title="Nasdaq New High - New Low", style=plot.style_stepline, color=nhnl_color)
+plot(nq_hide or na(breadth_ratio) ? na : (breadth_ratio - 1) * breadth_scale, title="S&P 500 Breadth Ratio (50MA/200MA)", style=plot.style_stepline, color=breadth_color)
 
 // =============================================================================
 // === RS Plots ================================================================
@@ -218,7 +249,7 @@ nq_scale = timeframe.isminutes ? nq_scale_intraday : nq_scale_daily
 // ±90 while rs lives in single digits — flattening the RS line into a trace.
 // Feeding the plots na on those timeframes removes the range entirely; na
 // contributes nothing to autoscale, and there was nothing visible to lose.
-// (nq_hide itself is defined above, in the New High/New Low block — same
+// (nq_hide itself is defined above, in the S&P 500 Breadth Ratio block — same
 // condition, needed there first now.)
 
 nq_p10 = plot(nq_hide ? na : nq_ma10 / nq_scale, color=#5d606b, display=display.none)
@@ -249,17 +280,37 @@ adr_ok = not na(adr) and adr != 0
 // === Data Table — colors and values computed at global scope (Pine v6 safe) ==
 // =============================================================================
 
-// Off 52-week high color
-pct_off_high_color = pct_off_high < 10 ? color.green : pct_off_high < 15 ? color.white : pct_off_high < 20 ? color.yellow : color.red
+// Off 52-week high color — same adaptive approach as the MA-distance rows
+// below: baseline is this stock's own lookback_period average of how far off
+// its high it typically sits, in ADRs, so a name that normally trades 3 ADRs
+// below its high needs a real breakdown to read red, not just its usual
+// distance from a high it hasn't been near in a while. highest_high - close
+// is never negative by construction, so there's no downside case to mirror
+// here the way the MA rows need for below-MA readings.
+adr_off_high = adr_ok ? (highest_high - close) / adr : float(na)
 
-// 10MA distance colors — adaptive: baseline is this stock's own lookback_period
-// average of |v10adr| (how far it typically sits from its 10MA, in ADRs), so a
-// name that normally runs at 3 ADRs needs to clear a much higher bar than one
-// that normally sits at 0.5 before it reads red. Falls back to a running
-// average since inception while lookback_period bars haven't accumulated yet —
-// same shape as running_high above, just a mean instead of a max, plus a
-// not-na guard that one didn't need since v10adr can be na before adr_ok while
-// high never is.
+var float adr_off_high_run_sum = 0.0
+var int   adr_off_high_run_n   = 0
+if not na(adr_off_high)
+    adr_off_high_run_sum += adr_off_high
+    adr_off_high_run_n   += 1
+adr_off_high_run_avg = adr_off_high_run_n > 0 ? adr_off_high_run_sum / adr_off_high_run_n : float(na)
+
+adr_off_high_baseline_full = ta.sma(adr_off_high, lookback_period)
+adr_off_high_baseline      = na(adr_off_high_baseline_full) ? adr_off_high_run_avg : adr_off_high_baseline_full
+
+adr_off_high_full_scale = adr_off_high_baseline * adr_red_mult
+pct_off_high_color      = na(adr_off_high_baseline) ? color.white : adr_off_high > adr_off_high_full_scale * adr_green_pct ? color.red : color.green
+
+// 10MA distance colors — adaptive: baseline is this stock's own average of
+// |v10adr| over len10 x adr_baseline_mult bars (its own MA period scaled up,
+// not the shared 260-day lookback_period — see the Adaptive Baseline input),
+// so a name that normally runs at 3 ADRs needs to clear a much higher bar
+// than one that normally sits at 0.5 before it reads red. Falls back to a
+// running average since inception while that window hasn't filled yet — same
+// shape as running_high above, just a mean instead of a max, plus a not-na
+// guard that one didn't need since v10adr can be na before adr_ok while high
+// never is.
 v10adr = adr_ok ? (close - ma10) / adr : float(na)
 
 var float v10adr_run_sum = 0.0
@@ -269,10 +320,11 @@ if not na(v10adr)
     v10adr_run_n   += 1
 v10adr_run_avg = v10adr_run_n > 0 ? v10adr_run_sum / v10adr_run_n : float(na)
 
-v10adr_baseline_full = ta.sma(math.abs(v10adr), lookback_period)
+v10adr_baseline_full = ta.sma(math.abs(v10adr), len10 * adr_baseline_mult)
 v10adr_baseline      = na(v10adr_baseline_full) ? v10adr_run_avg : v10adr_baseline_full
 
-v10adr_color       = na(v10adr_baseline) ? color.white : v10adr > v10adr_baseline * adr_red_mult or v10adr < -v10adr_baseline * adr_red_mult ? color.red : v10adr > v10adr_baseline * adr_green_mult ? color.green : color.white
+v10adr_full_scale  = v10adr_baseline * adr_red_mult
+v10adr_color       = na(v10adr_baseline) ? color.white : math.abs(v10adr) > v10adr_full_scale * adr_green_pct ? color.red : color.green
 dist2_10ma_p_color = v10adr_color
 
 // 20MA distance colors — same adaptive approach as 10MA above.
@@ -285,10 +337,11 @@ if not na(v20adr)
     v20adr_run_n   += 1
 v20adr_run_avg = v20adr_run_n > 0 ? v20adr_run_sum / v20adr_run_n : float(na)
 
-v20adr_baseline_full = ta.sma(math.abs(v20adr), lookback_period)
+v20adr_baseline_full = ta.sma(math.abs(v20adr), len20 * adr_baseline_mult)
 v20adr_baseline      = na(v20adr_baseline_full) ? v20adr_run_avg : v20adr_baseline_full
 
-v20adr_color       = na(v20adr_baseline) ? color.white : v20adr > v20adr_baseline * adr_red_mult or v20adr < -v20adr_baseline * adr_red_mult ? color.red : v20adr > v20adr_baseline * adr_green_mult ? color.green : color.white
+v20adr_full_scale  = v20adr_baseline * adr_red_mult
+v20adr_color       = na(v20adr_baseline) ? color.white : math.abs(v20adr) > v20adr_full_scale * adr_green_pct ? color.red : color.green
 dist2_20ma_p_color = v20adr_color
 
 // 50MA distance colors — same adaptive approach again. This also retires the
@@ -305,10 +358,11 @@ if not na(v50adr)
     v50adr_run_n   += 1
 v50adr_run_avg = v50adr_run_n > 0 ? v50adr_run_sum / v50adr_run_n : float(na)
 
-v50adr_baseline_full = ta.sma(math.abs(v50adr), lookback_period)
+v50adr_baseline_full = ta.sma(math.abs(v50adr), len50 * adr_baseline_mult)
 v50adr_baseline      = na(v50adr_baseline_full) ? v50adr_run_avg : v50adr_baseline_full
 
-v50adr_color       = na(v50adr_baseline) ? color.white : v50adr > v50adr_baseline * adr_red_mult or v50adr < -v50adr_baseline * adr_red_mult ? color.red : v50adr > v50adr_baseline * adr_green_mult ? color.green : color.white
+v50adr_full_scale  = v50adr_baseline * adr_red_mult
+v50adr_color       = na(v50adr_baseline) ? color.white : math.abs(v50adr) > v50adr_full_scale * adr_green_pct ? color.red : color.green
 dist2_50ma_p_color = v50adr_color
 
 // Sized to what is actually written: columns 1-4, four rows. (The original 6x22
@@ -324,30 +378,30 @@ if barstate.islast
     row_num = 0
 
     // --- Off 52-week High ---
-    table.cell(data_table, 1, row_num, "Off", text_color=pct_off_high_color, text_size=size_tbl)
-    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(highest_high - close, "0.00") : str.tostring(highest_high, "0.0000"), text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 3, row_num, str.tostring(pct_off_high, "0.00") + "%", text_color=pct_off_high_color, text_size=size_tbl)
-    table.cell(data_table, 4, row_num, adr_ok ? str.tostring((highest_high - close) / adr, "0.00") : "N/A", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 1, row_num, "Off", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, str.tostring(pct_off_high, "0.00") + "%", text_color=pct_off_high_color, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, na(adr_off_high_baseline) ? "N/A" : str.tostring(adr_off_high_baseline, "0.00"), text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 4, row_num, adr_ok ? str.tostring(adr_off_high, "0.00") : "N/A", text_color=pct_off_high_color, text_size=size_tbl)
     row_num := row_num + 1
 
     // --- Distance to 10MA ---
-    table.cell(data_table, 1, row_num, "10MA", text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(dist2_10ma, "0.00") : str.tostring(dist2_10ma, "0.0000"), text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 3, row_num, str.tostring(dist2_10ma_p, "0.00") + "%", text_color=dist2_10ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 1, row_num, "10ma", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, str.tostring(dist2_10ma_p, "0.00") + "%", text_color=dist2_10ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, na(v10adr_baseline) ? "N/A" : str.tostring(v10adr_baseline, "0.00"), text_color=color.white, text_size=size_tbl)
     table.cell(data_table, 4, row_num, str.tostring(v10adr, "0.00"), text_color=v10adr_color, text_size=size_tbl)
     row_num := row_num + 1
 
     // --- Distance to EMA21 (SMA4 on weekly) ---
-    table.cell(data_table, 1, row_num, "EMA21", text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(dist2_20ma, "0.00") : str.tostring(dist2_20ma, "0.0000"), text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 3, row_num, str.tostring(dist2_20ma_p, "0.00") + "%", text_color=dist2_20ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 1, row_num, "21ma", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, str.tostring(dist2_20ma_p, "0.00") + "%", text_color=dist2_20ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, na(v20adr_baseline) ? "N/A" : str.tostring(v20adr_baseline, "0.00"), text_color=color.white, text_size=size_tbl)
     table.cell(data_table, 4, row_num, str.tostring(v20adr, "0.00"), text_color=v20adr_color, text_size=size_tbl)
     row_num := row_num + 1
 
     // --- Distance to 50MA ---
-    table.cell(data_table, 1, row_num, "50MA", text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 2, row_num, close > 2 ? str.tostring(dist2_50ma, "0.00") : str.tostring(dist2_50ma, "0.0000"), text_color=color.white, text_size=size_tbl)
-    table.cell(data_table, 3, row_num, str.tostring(dist2_50ma_p, "0.00") + "%", text_color=dist2_50ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 1, row_num, "50ma", text_color=color.white, text_size=size_tbl)
+    table.cell(data_table, 2, row_num, str.tostring(dist2_50ma_p, "0.00") + "%", text_color=dist2_50ma_p_color, text_size=size_tbl)
+    table.cell(data_table, 3, row_num, na(v50adr_baseline) ? "N/A" : str.tostring(v50adr_baseline, "0.00"), text_color=color.white, text_size=size_tbl)
     table.cell(data_table, 4, row_num, str.tostring(v50adr, "0.00"), text_color=v50adr_color, text_size=size_tbl)
 
     // Uniform alignment: label column left, all three numeric columns right, so a
