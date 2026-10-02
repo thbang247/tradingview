@@ -280,6 +280,9 @@ ud_ratio    = ud_down_sum > 0 ? ud_up_sum / ud_down_sum : float(na)
 //   RVol@T  — same hue scale as the volume bars, at full opacity
 //   U/D     — lime / green above the accumulation line, yellow neutral, red below
 //             the distribution line: a red-to-green axis, since it's a scalar
+//   Vol     — moved here from price_overlay.py's table, which used to duplicate
+//             this whole script just to show this one cell. Reuses
+//             volume_avg_short, already computed above — no new calculation.
 ud_color = na(ud_ratio) ? color.new(color.white, 40) : ud_ratio >= ud_accum_level ? color.lime : ud_ratio >= 1.0 ? #75da56 : ud_ratio >= ud_distrib_level ? color.yellow : color.rgb(255, 80, 80)
 
 // Cell colour derives from the number the cell SHOWS, not from bar_color. They
@@ -290,9 +293,25 @@ rvol_cell_color = getVolBarHue(rvol_at_time, up_day, surge_low, surge_high)
 
 label_color = color.new(color.white, 30)
 
+// Small pure formatter, ported from price_overlay.py. No series calls, so it's
+// safe to duplicate — unlike the threshold/ratio logic that used to live over
+// there, this has no meaningful "drift out of sync" risk.
+fmtDecimal(float v) =>
+    string s = "N/A"
+    if not na(v)
+        if v >= 1e9
+            s := str.tostring(v / 1e9, "#.##") + "B"
+        else if v >= 1e6
+            s := str.tostring(v / 1e6, "#.##") + "M"
+        else if v >= 1e3
+            s := str.tostring(v / 1e3, "#.##") + "K"
+        else
+            s := str.tostring(v, "#.##")
+    s
+
 var table rvol_table = na
 if barstate.isfirst and rvol_show
-    rvol_table := table.new(position.top_right, 2, 2)
+    rvol_table := table.new(position.top_right, 2, 3)
 
 if barstate.islast and rvol_show
     table.cell(rvol_table, 0, 0, "RVol@T", text_color = label_color, text_size = size.normal)
@@ -301,7 +320,10 @@ if barstate.islast and rvol_show
     table.cell(rvol_table, 0, 1, "U/D", text_color = label_color, text_size = size.normal)
     table.cell(rvol_table, 1, 1, na(ud_ratio) ? "n/a" : str.tostring(ud_ratio, "0.00"), text_color = ud_color, text_size = size.normal)
 
-    for row = 0 to 1
+    table.cell(rvol_table, 0, 2, "Vol", text_color = label_color, text_size = size.normal)
+    table.cell(rvol_table, 1, 2, "$" + fmtDecimal(volume_avg_short), text_color = color.white, text_size = size.normal)
+
+    for row = 0 to 2
         table.cell_set_text_halign(rvol_table, 0, row, text.align_right)
         table.cell_set_text_halign(rvol_table, 1, row, text.align_left)
 

@@ -81,14 +81,18 @@ is_lowest_50   = extension_factor == ta.lowest(extension_factor,  lookback_50)
 // the plot is a signed column around zero — the bar already points up or down,
 // so colouring it warm-vs-cool would have restated what the geometry shows.
 //
-//   C_MAX   200-bar record AND beyond ±7   — the extreme worth stopping on
-//   C_REC   200-bar record, within ±7
-//   C_BEY   beyond ±7, not a record
-//   GREEN   emerging strength — consecutive climb off a low base (see below)
-//   RED     emerging weakness — consecutive fall off a high base, mirrors GREEN
-//   C_NEAR  50-bar extreme
-//   C_ABOVE above the extension 10MA
-//   C_DIM   below the extension 10MA
+//   C_MAX      200-bar record AND beyond ±7   — the extreme worth stopping on
+//   C_REC      200-bar record, within ±7
+//   C_BEY      beyond ±7, not a record
+//   GREEN      emerging strength — consecutive climb off a low base (see below)
+//   RED        emerging weakness — consecutive fall off a high base, mirrors GREEN
+//   C_NEAR     50-bar extreme — new high
+//   C_NEAR_DOWN 50-bar extreme — new low (violet, not a shade of red — #ff6b6b
+//              is already used for the day-3/day-4 downtrend colors below, and
+//              a near-identical shade at a similar opacity would be hard to
+//              tell apart from those, undoing the point of a distinct precursor)
+//   C_ABOVE    above the extension 10MA
+//   C_DIM      below the extension 10MA
 //
 // The original cascade also had the two neutral tiers backwards. #ffffffce is
 // alpha 0xCE = 81% transparent, while the default was color.new(color.white, 70)
@@ -96,12 +100,13 @@ is_lowest_50   = extension_factor == ta.lowest(extension_factor,  lookback_50)
 // despite the comment claiming "brighter white". Corrected below.
 //
 // Note: ±high_threshold (±4) is still used only for hlines, not bar colouring.
-C_MAX   = #ff2b2b                        // record AND beyond the threshold
-C_REC   = #ffd11a                        // 200-bar record
-C_BEY   = #ff8a1f                        // beyond the threshold
-C_NEAR  = color.new(#ffd11a, 45)         // 50-bar extreme
-C_ABOVE = color.new(color.white, 35)     // above extension 10MA
-C_DIM   = color.new(color.white, 70)     // below extension 10MA
+C_MAX      = #ff2b2b                        // record AND beyond the threshold
+C_REC      = #ffd11a                        // 200-bar record
+C_BEY      = #ff8a1f                        // beyond the threshold
+C_NEAR     = color.new(#ffd11a, 45)         // 50-bar extreme — new high
+C_NEAR_DOWN = color.new(#b366ff, 45)        // 50-bar extreme — new low (violet — distinct from every red already in the palette)
+C_ABOVE    = color.new(color.white, 35)     // above extension 10MA
+C_DIM      = color.new(color.white, 70)     // below extension 10MA
 
 // Trend-start stages. Green and this red are otherwise unused in this
 // palette, so each reads as its own category rather than a shade of the
@@ -121,28 +126,29 @@ C_DOWN_LIGHT = color.new(#ff6b6b, 55)    // downtrend day 3 — light, transluce
 C_DOWN_DARK  = color.new(#ff6b6b,  0)    // downtrend day 4+ — solid coral-red, deliberately short of C_MAX
 
 // Each condition is direction-agnostic: a 200-bar record at either end counts as
-// a record, and ±7 counts in both signs.
+// a record, and ±7 counts in both signs. is_highest_50/is_lowest_50 (used
+// directly below, not combined) are NOT direction-agnostic — they're what
+// split the "50-bar extreme" tier into new-high (C_NEAR) vs new-low
+// (C_NEAR_DOWN).
 is_record = is_highest_200 or is_lowest_200
 is_beyond = extension_factor > extreme_threshold or extension_factor < -extreme_threshold
-is_near   = is_highest_50  or is_lowest_50
 
 // =============================================================================
 // === Emerging Strength / Emerging Weakness ===================================
 // =============================================================================
 // Pattern: extension_factor sets a fresh 50-bar high (or low) for N
-// consecutive bars — i.e. dim yellow (is_near) fires N days running in the
-// same direction — having STARTED from a near-zero reading. That's price
-// reclaiming its 50MA from a washed-out position (strength), or rolling over
-// from one before it's gone far (weakness): the early phase of a move,
-// before it becomes extended.
+// consecutive bars — i.e. the same fresh-high/fresh-low check that drives
+// C_NEAR/C_NEAR_DOWN fires N days running in the same direction — having
+// STARTED from a near-zero reading. That's price reclaiming its 50MA from a
+// washed-out position (strength), or rolling over from one before it's gone
+// far (weakness): the early phase of a move, before it becomes extended.
 //
 // Deliberately stricter than "extension_factor > yesterday": every day of
 // the streak has to clear the whole trailing 50-bar window, not just the
 // prior bar. That makes a green/red streak structurally the same event as
-// consecutive dim-yellow days, just counted and colored once it runs 3+ deep
-// — so days 1-2 of a streak show dim yellow automatically, with no separate
-// handling needed, because is_near is true on those exact days by
-// construction.
+// consecutive C_NEAR/C_NEAR_DOWN days, just counted and colored once it runs
+// 3+ deep — so days 1-2 of a streak already show the direction-correct dim
+// color automatically, with no separate handling needed.
 //
 // streak_base records the value the bar before the streak began, not the
 // current value, so the "started low" test survives as the streak carries
@@ -201,8 +207,10 @@ else if emerging_strength
     extension_color := strength_color
 else if emerging_weakness
     extension_color := weakness_color
-else if is_near
+else if is_highest_50
     extension_color := C_NEAR
+else if is_lowest_50
+    extension_color := C_NEAR_DOWN
 else if extension_factor > extension_ma10
     extension_color := C_ABOVE
 else
