@@ -413,3 +413,62 @@ else if barstate.islast
     // person switches FROM daily/weekly TO intraday mid-session, rather than
     // relying only on "never populated" for a table object that already exists.
     table.clear(earnTable, 0, 0, 3, 5)
+
+// =============================================================================
+// === Table: Earnings & Sales ==================================================
+// =============================================================================
+// Anchored bottom_right so it sits below the technical-data table above
+// (top_right) — Pine tables only snap to 9 fixed positions, there's no manual
+// stacking, so this is how "underneath the existing table" is achieved.
+//
+// Green/red per Bang: QoQ growth >= earnings_growth_thresh (default 30%) reads
+// green, anything short of that (including a decline) reads red. Same rule
+// for the Forward row, just measured against the latest actual instead of
+// another quarter.
+var table earnTable = table.new(position.bottom_right, 4, 6, bgcolor = tableBgColor)
+
+if show_earnings_table and barstate.islast and (timeframe.isdaily or timeframe.isweekly) and isStock
+    table.cell(earnTable, 0, 0, "Qtr", text_color = textColor, text_size = tableSize)
+    table.cell(earnTable, 1, 0, "EPS",  text_color = textColor, text_size = tableSize)
+    table.cell(earnTable, 2, 0, "Sales", text_color = textColor, text_size = tableSize)
+    table.cell(earnTable, 3, 0, "Margin", text_color = textColor, text_size = tableSize)
+
+    // Forward — estimate for the next, not-yet-reported quarter. No forward
+    // margin field exists on TradingView, so that cell is always N/A.
+    table.cell(earnTable, 0, 1, "Fwd", text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 1, na(eps_fwd_growth) ? "N/A" : str.tostring(eps_fwd_growth, "0") + "%", text_color = eps_fwd_color, text_size = tableSize)
+    table.cell(earnTable, 2, 1, na(rev_fwd_growth) ? "N/A" : str.tostring(rev_fwd_growth, "0") + "%", text_color = rev_fwd_color, text_size = tableSize)
+    table.cell(earnTable, 3, 1, "N/A", text_color = color.white, text_size = tableSize)
+
+    // Latest reported quarter through 3 quarters back
+    table.cell(earnTable, 0, 2, rowLabel(eps_hist_time, 0), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 2, na(eps_g0) ? "N/A" : str.tostring(eps_g0, "0") + "%", text_color = eps_c0, text_size = tableSize)
+    table.cell(earnTable, 2, 2, na(rev_g0) ? "N/A" : str.tostring(rev_g0, "0") + "%", text_color = rev_c0, text_size = tableSize)
+    table.cell(earnTable, 3, 2, na(margin_v0) ? "N/A" : str.tostring(margin_v0, "0") + "%", text_color = margin_c0, text_size = tableSize)
+
+    table.cell(earnTable, 0, 3, rowLabel(eps_hist_time, 1), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 3, na(eps_g1) ? "N/A" : str.tostring(eps_g1, "0") + "%", text_color = eps_c1, text_size = tableSize)
+    table.cell(earnTable, 2, 3, na(rev_g1) ? "N/A" : str.tostring(rev_g1, "0") + "%", text_color = rev_c1, text_size = tableSize)
+    table.cell(earnTable, 3, 3, na(margin_v1) ? "N/A" : str.tostring(margin_v1, "0") + "%", text_color = margin_c1, text_size = tableSize)
+
+    table.cell(earnTable, 0, 4, rowLabel(eps_hist_time, 2), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 4, na(eps_g2) ? "N/A" : str.tostring(eps_g2, "0") + "%", text_color = eps_c2, text_size = tableSize)
+    table.cell(earnTable, 2, 4, na(rev_g2) ? "N/A" : str.tostring(rev_g2, "0") + "%", text_color = rev_c2, text_size = tableSize)
+    table.cell(earnTable, 3, 4, na(margin_v2) ? "N/A" : str.tostring(margin_v2, "0") + "%", text_color = margin_c2, text_size = tableSize)
+
+    table.cell(earnTable, 0, 5, rowLabel(eps_hist_time, 3), text_color = color.white, text_size = tableSize)
+    table.cell(earnTable, 1, 5, na(eps_g3) ? "N/A" : str.tostring(eps_g3, "0") + "%", text_color = eps_c3, text_size = tableSize)
+    table.cell(earnTable, 2, 5, na(rev_g3) ? "N/A" : str.tostring(rev_g3, "0") + "%", text_color = rev_c3, text_size = tableSize)
+    table.cell(earnTable, 3, 5, na(margin_v3) ? "N/A" : str.tostring(margin_v3, "0") + "%", text_color = margin_c3, text_size = tableSize)
+
+    for earnRow = 0 to 5
+        table.cell_set_text_halign(earnTable, 0, earnRow, text.align_right)
+        table.cell_set_text_halign(earnTable, 1, earnRow, text.align_left)
+        table.cell_set_text_halign(earnTable, 2, earnRow, text.align_left)
+        table.cell_set_text_halign(earnTable, 3, earnRow, text.align_left)
+else if barstate.islast
+    // Backstop on top of the condition above (which already means no cell is
+    // ever written on intraday): clears out whatever the table last held if the
+    // person switches FROM daily/weekly TO intraday mid-session, rather than
+    // relying only on "never populated" for a table object that already exists.
+    table.clear(earnTable, 0, 0, 3, 5)
