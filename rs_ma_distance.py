@@ -2,7 +2,7 @@
 indicator("RS & MA Distance", overlay = false)
 
 // === Display Helpers ===
-table_pos       = position.bottom_right
+table_pos       = position.bottom_left
 size_tbl        = size.small
 align_txt_left  = text.align_left
 align_txt_right = text.align_right
@@ -18,10 +18,7 @@ lookback_dist     = input.int(21,  "MA Distance Lookback",     group = "Lookback
 instrument_comparison = input.symbol("SPY", "Comparison Instrument",        group = "RS")
 rs_lookback_length    = input.int(50,       "RS Look-back Length", minval=1, group = "RS")
 rs_atr_length         = input.int(20,       "RS ATR Length",                group = "RS")
-rs_avg_length         = input.int(10,       "(unused) RS Average Length",    group = "RS")
-rs_consecutive_bars   = input.int(6,        "(unused) RS Consecutive Bars",  minval=2, group = "RS")
-rs_accel_length       = input.int(5,        "(unused) RS Acceleration Length", group = "RS")
-rs_slope_length       = input.int(20,       "(unused) RS Slope Length",        group = "RS")
+
 // Reserved: fed the removed RS Bullish Divergence. Kept declared because deleting
 // a mid-list input shifts the saved values of every input after it — here that
 // would silently move your ADR Length and Nasdaq scales onto the wrong slots.
@@ -67,6 +64,30 @@ adr_red_mult   = input.float(1.5, "Adaptive Color: Red Multiplier (Full Scale)",
 // it stays on lookback_period, since "52-week high" is a 52-week concept by
 // definition already.
 adr_baseline_mult = input.int(5, "Adaptive Baseline: Lookback (x MA period)", minval=1, group="Adaptive Color")
+
+// === Inputs: Minute-Chart Day Stats ==========================================
+// Appended last so no saved input position shifts. Drive the extra table that
+// only exists on minute charts (see "Minute-Chart Day Stats Table" below).
+stats_lookback_days = input.int(50,    "Lookback (completed daily bars)", minval=5, maxval=500, group="Minute Stats")
+stats_move_thr1     = input.float(5.0,  "Move Threshold 1 (%)",  minval=0.1, step=0.5, group="Minute Stats")
+stats_move_thr2     = input.float(10.0, "Move Threshold 2 (%)",  minval=0.1, step=0.5, group="Minute Stats")
+stats_measure       = input.string("Daily range (High-Low)", "Move Measure", options=["Daily range (High-Low)", "Close-to-close change"], group="Minute Stats")
+
+// === Inputs: 1-Month RS % ====================================================
+// Appended last, again, so no saved input position shifts.
+rs1m_lookback = input.int(25, "1M RS Lookback (completed daily bars)", minval=5, maxval=250, group="1M / 3M / 6M RS")
+rs1m_method   = input.string("Range position", "1M RS % Method", options=["Range position", "Percentile rank"], group="1M / 3M / 6M RS")
+// 3M / 6M reuse the method above. Appended after the 1M inputs, so still last.
+rs3m_lookback = input.int(63,  "3M RS Lookback (completed daily bars)", minval=10, maxval=500, group="1M / 3M / 6M RS")
+rs6m_lookback = input.int(126, "6M RS Lookback (completed daily bars)", minval=10, maxval=500, group="1M / 3M / 6M RS")
+// Master switch. Off = the ratio request below falls back to the chart's own symbol
+// (a request that is known to resolve) and the RS row is not drawn, so a
+// problem in the ratio symbol can be isolated without editing code.
+rs_show       = input.bool(true, "Show RS row (1M / 3M / 6M)", group="1M / 3M / 6M RS")
+// Color cutoffs for the RS cells, appended last. Green above the first, white from
+// the second up to the first, red below the second.
+rs_green_above = input.float(80, "RS Color: Green above (%)",        minval=0, maxval=100, group="1M / 3M / 6M RS")
+rs_white_from  = input.float(60, "RS Color: White from (%) - red below", minval=0, maxval=100, group="1M / 3M / 6M RS")
 
 // =============================================================================
 // === Moving Averages =========================================================
@@ -365,10 +386,57 @@ v50adr_full_scale  = v50adr_baseline * adr_red_mult
 v50adr_color       = na(v50adr_baseline) ? color.white : math.abs(v50adr) > v50adr_full_scale * adr_green_pct ? color.red : color.green
 dist2_50ma_p_color = v50adr_color
 
-// Sized to what is actually written: columns 1-4, four rows. (The original 6x22
+// 1 / 3 / 6-Month RS % --------------------------------------------------------
+// Educated reconstruction of the "1-Mth RS %" column in Jeff Sun's RS sheet; his
+// exact formula is not public, so treat this as a best guess, not a copy. The
+// same formula runs over three window lengths.
+//   RS      = stock close / comparison-instrument close, per DAILY bar (plain price
+//             ratio, the same `=E2/E$2` his tutorial uses — no ATR normalisation,
+//             that is a different measure from the `rs` line plotted above)
+//   Window  = last N completed daily bars. Defaults: 1M = 25 (his tutorial charts
+//             ~25 points), 3M = 63, 6M = 126 (usual trading-day counts)
+//   Range position : (RS - window low) / (window high - window low) * 100
+//                    100% = RS sits at its N-bar high, 0% = at its low
+//   Percentile rank: share of the window's days with RS at or below the latest
+//                    (ta.percentrank), 100% = highest RS in the window
+// The ratio is requested as a "SYMBOL/COMPARISON" expression symbol on the daily
+// timeframe, so the same daily bars are used on a minute chart as on a daily one,
+// and the two symbols' sessions are lined up by TradingView, not by hand. One
+// request returns all three windows.
+// Lagged one daily bar with lookahead_on (the non-repainting form): the in-progress
+// day is excluded, matching "last done daily RS".
+f_rs_win(int n, bool pctl) =>
+    hi  = ta.highest(close, n)
+    lo  = ta.lowest(close, n)
+    pos = hi > lo ? (close - lo) / (hi - lo) * 100 : float(na)
+    prk = ta.percentrank(close, n - 1)
+    pctl ? prk : pos
+
+f_rs_multi(int n1, int n2, int n3, bool pctl) =>
+    r1 = f_rs_win(n1, pctl)
+    r2 = f_rs_win(n2, pctl)
+    r3 = f_rs_win(n3, pctl)
+    [r1[1], r2[1], r3[1]]
+
+// Symbol is built from prefix:ticker, NOT syminfo.tickerid: tickerid can carry
+// encoded chart settings (extended session, adjustment) and appending "/SPY" to
+// that string yields an invalid symbol, which kills the whole script at runtime.
+rs_symbol = rs_show ? syminfo.prefix + ":" + syminfo.ticker + "/" + instrument_comparison : syminfo.tickerid
+
+[rs_1m_pct, rs_3m_pct, rs_6m_pct] = request.security(rs_symbol, "D", f_rs_multi(rs1m_lookback, rs3m_lookback, rs6m_lookback, rs1m_method == "Percentile rank"), lookahead = barmerge.lookahead_on)
+
+// RS cell color. Judged on the value as DISPLAYED (rounded to a whole percent), so a
+// cell reading "80%" never turns green off a hidden 80.4. Exactly on the lower
+// cutoff counts as white ("white if > 60", red only when smaller). na stays white.
+f_rs_color(float v) =>
+    r = math.round(v)
+    na(v) ? color.white : r > rs_green_above ? color.green : r >= rs_white_from ? color.white : color.red
+
+// Sized to what is actually written: columns 1-4, five rows. (The original 6x22
 // allocation was pure over-allocation, not a visual artifact — unset cells are
-// not rendered, so those empty rows drew nothing.)
-var data_table = table.new(position.top_right, 5, 4, bgcolor=color.new(color.black, 90), border_width=1, border_color=color.white)
+// not rendered, so those empty rows drew nothing.) The fifth row is RS: 1M / 3M /
+// 6M in columns 2 / 3 / 4.
+var data_table = table.new(position.top_right, 5, 5, bgcolor=color.new(color.black, 90), border_width=1, border_color=color.white)
 
 // Table now renders on every timeframe, including minute charts. It previously
 // carried `and not timeframe.isintraday`, which left the intraday pane showing
@@ -403,6 +471,14 @@ if barstate.islast
     table.cell(data_table, 2, row_num, str.tostring(dist2_50ma_p, "0.00") + "%", text_color=dist2_50ma_p_color, text_size=size_tbl)
     table.cell(data_table, 3, row_num, na(v50adr_baseline) ? "N/A" : str.tostring(v50adr_baseline, "0.00"), text_color=color.white, text_size=size_tbl)
     table.cell(data_table, 4, row_num, str.tostring(v50adr, "0.00"), text_color=v50adr_color, text_size=size_tbl)
+    row_num := row_num + 1
+
+    // --- RS: 1M / 3M / 6M in columns 2 / 3 / 4 (daily close / comparison close, completed days) ---
+    if rs_show
+        table.cell(data_table, 1, row_num, "RS", text_color=color.white, text_size=size_tbl)
+        table.cell(data_table, 2, row_num, na(rs_1m_pct) ? "N/A" : str.tostring(rs_1m_pct, "0") + "%", text_color=f_rs_color(rs_1m_pct), text_size=size_tbl)
+        table.cell(data_table, 3, row_num, na(rs_3m_pct) ? "N/A" : str.tostring(rs_3m_pct, "0") + "%", text_color=f_rs_color(rs_3m_pct), text_size=size_tbl)
+        table.cell(data_table, 4, row_num, na(rs_6m_pct) ? "N/A" : str.tostring(rs_6m_pct, "0") + "%", text_color=f_rs_color(rs_6m_pct), text_size=size_tbl)
 
     // Uniform alignment: label column left, all three numeric columns right, so a
     // single column reads straight down. Previously set per row and inconsistently
@@ -414,13 +490,104 @@ if barstate.islast
         table.cell_set_text_halign(data_table, 3, r, text_halign=align_txt_right)
         table.cell_set_text_halign(data_table, 4, r, text_halign=align_txt_right)
 
+    // The RS row (4) only exists when the switch is on (cell_set_text_halign errors on
+    // a cell that was never created), so it is aligned on its own, outside the loop above.
+    if rs_show
+        table.cell_set_text_halign(data_table, 1, 4, text_halign=align_txt_left)
+        table.cell_set_text_halign(data_table, 2, 4, text_halign=align_txt_right)
+        table.cell_set_text_halign(data_table, 3, 4, text_halign=align_txt_right)
+        table.cell_set_text_halign(data_table, 4, 4, text_halign=align_txt_right)
+
+// =============================================================================
+// === Minute-Chart Day Stats Table ============================================
+// =============================================================================
+// Minute charts only. For the last `stats_lookback_days` COMPLETED daily bars:
+//   - % of days whose move exceeded that day's own ADR%
+//   - % of days whose move exceeded 2 x that day's own ADR%
+//   - % of days whose move exceeded stats_move_thr1 (5%)
+//   - % of days whose move exceeded stats_move_thr2 (10%)
+//
+// ADR% = daily ADR (SMA of high-low, the same ADR the rest of this script uses,
+// at the daily length) / that day's close * 100, evaluated on each day itself —
+// the reference moves with the stock's volatility through the window, it is not
+// today's ADR% applied backwards. "Move" is the day's (high-low)/close*100 by
+// default, so it is measured on the same basis as ADR%; the Move Measure input
+// switches it to |close-to-close change| instead.
+//
+// Computed inside the daily request so no minute data is aggregated by hand. Window
+// counts come from ta.sma over 0/1 flags (x length), not a dynamic [n] history
+// offset, which Pine cannot size the buffer for inside a security context. Until
+// n daily bars exist the sma is na, so a young ticker falls back to running totals
+// (ta.cum) and reports over the days it has. Every value is lagged one daily bar
+// and requested with lookahead_on — the standard non-repainting form — which also
+// means the in-progress day is excluded: its range is still forming and would
+// understate every row until the close.
+f_day_stats(int n, float thr1, float thr2, int alen, bool c2c) =>
+    adr_pct  = ta.sma(high - low, alen) / close * 100
+    move_pct = c2c ? math.abs(close - close[1]) / close[1] * 100 : (high - low) / close * 100
+    ok       = not na(adr_pct) and not na(move_pct) and adr_pct > 0
+
+    f_valid = ok ? 1.0 : 0.0
+    f_adr   = (ok and move_pct > adr_pct)     ? 1.0 : 0.0
+    f_2adr  = (ok and move_pct > 2 * adr_pct) ? 1.0 : 0.0
+    f_thr1  = (ok and move_pct > thr1)        ? 1.0 : 0.0
+    f_thr2  = (ok and move_pct > thr2)        ? 1.0 : 0.0
+
+    // All evaluated on every bar (ta.* must not sit inside a conditional branch).
+    s_valid = ta.sma(f_valid, n)
+    s_adr   = ta.sma(f_adr,   n)
+    s_2adr  = ta.sma(f_2adr,  n)
+    s_thr1  = ta.sma(f_thr1,  n)
+    s_thr2  = ta.sma(f_thr2,  n)
+    t_valid = ta.cum(f_valid)
+    t_adr   = ta.cum(f_adr)
+    t_2adr  = ta.cum(f_2adr)
+    t_thr1  = ta.cum(f_thr1)
+    t_thr2  = ta.cum(f_thr2)
+
+    full    = not na(s_valid)
+    w_valid = full ? math.round(s_valid * n) : t_valid
+    w_adr   = full ? math.round(s_adr   * n) : t_adr
+    w_2adr  = full ? math.round(s_2adr  * n) : t_2adr
+    w_thr1  = full ? math.round(s_thr1  * n) : t_thr1
+    w_thr2  = full ? math.round(s_thr2  * n) : t_thr2
+    [w_valid[1], w_adr[1], w_2adr[1], w_thr1[1], w_thr2[1]]
+
+[st_n, st_adr, st_2adr, st_thr1, st_thr2] = request.security(syminfo.tickerid, "D", f_day_stats(stats_lookback_days, stats_move_thr1, stats_move_thr2, adr_length_input, stats_measure == "Close-to-close change"), lookahead = barmerge.lookahead_on)
+
+// Functions must be declared at global scope, so this sits outside the if below.
+f_pct(float hits, float days) => (na(hits) or na(days) or days <= 0) ? "N/A" : str.tostring(hits / days * 100, "0") + "%"
+
+// `na` on every other timeframe: an allocated table draws its frame even with no
+// cells written, so it is only created where it is used.
+var table stats_table = timeframe.isminutes ? table.new(table_pos, 2, 4, bgcolor=color.new(color.black, 90), border_width=1, border_color=color.white) : na
+
+if barstate.islast and timeframe.isminutes
+    table.cell(stats_table, 0, 0, "> ADR%", text_color=color.white, text_size=size_tbl)
+    table.cell(stats_table, 1, 0, f_pct(st_adr, st_n), text_color=color.white, text_size=size_tbl)
+
+    table.cell(stats_table, 0, 1, "> 2×ADR%", text_color=color.white, text_size=size_tbl)
+    table.cell(stats_table, 1, 1, f_pct(st_2adr, st_n), text_color=color.white, text_size=size_tbl)
+
+    table.cell(stats_table, 0, 2, "> " + str.tostring(stats_move_thr1, "#.##") + "%", text_color=color.white, text_size=size_tbl)
+    table.cell(stats_table, 1, 2, f_pct(st_thr1, st_n), text_color=color.white, text_size=size_tbl)
+
+    table.cell(stats_table, 0, 3, "> " + str.tostring(stats_move_thr2, "#.##") + "%", text_color=color.white, text_size=size_tbl)
+    table.cell(stats_table, 1, 3, f_pct(st_thr2, st_n), text_color=color.white, text_size=size_tbl)
+
+    for r = 0 to 3
+        table.cell_set_text_halign(stats_table, 0, r, text_halign=align_txt_left)
+        table.cell_set_text_halign(stats_table, 1, r, text_halign=align_txt_right)
+
 // =============================================================================
 // === Background: NDFD Market Condition =======================================
 // =============================================================================
 daily_close_ndfd = request.security("NDFD", "D", close)
 color bg_color = na
 
-if timeframe.isintraday or timeframe.isdaily
+// Daily only: on intraday (minute) charts the pane shows the tables and nothing
+// else, so the NDFD tint is not drawn there.
+if timeframe.isdaily
     if daily_close_ndfd < 10
         bg_color := color.new(color.green, 90)
     else if daily_close_ndfd > 85
