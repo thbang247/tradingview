@@ -61,36 +61,29 @@ float_pct    = (na(shares_float) or na(total_shares) or total_shares <= 0 or sha
 // =============================================================================
 // === Earnings & Sales History =================================================
 // =============================================================================
-// request.earnings() updates on the bar a report is PUBLISHED; request.financial()
-// updates on the bar the NEXT fiscal period BEGINS — different timing rules, so
-// EPS and Revenue are tracked as two independent rolling histories rather than
-// assumed to land on the same bar. Rows are matched by recency (newest with
-// newest), not by a shared report date.
+// ONE clock drives all three columns: the EPS report.
+//
+// request.earnings() is requested with gaps_on, so it returns a value ONLY on the bar a
+// report is published (na on every other bar) — including when the reported figure equals
+// the previous quarter's. The old "value differs from the previous bar" test silently
+// dropped a quarter whenever two consecutive quarters printed the same EPS, which shifted
+// every row below it by one quarter.
+//
+// request.financial() works on the fiscal-period schedule, not the report date, so Sales
+// and Margin used to be tracked as separate histories and could sit on a different quarter
+// than EPS (and the row label, an EPS report date, was applied to all three). They are now
+// SNAPSHOTTED on the EPS report bar instead: at that moment the financial series holds the
+// quarter that was just reported, so one row = one quarter in all three columns, with one
+// shared label. If a ticker's financial data lags its report, row 0 Sales would show the
+// quarter before — worth a spot check against a known report.
 //
 // Keeps 6 entries, not 4: the oldest DISPLAYED row still needs a prior value to
-// compute its own QoQ growth against, so one extra slot is kept internally and
+// compute its own QoQ growth against, so spare slots are kept internally and
 // never shown in the table.
-eps_actual  = request.earnings(syminfo.tickerid, earnings.actual, ignore_invalid_symbol = true)
+eps_actual  = request.earnings(syminfo.tickerid, earnings.actual, gaps = barmerge.gaps_on, ignore_invalid_symbol = true)
 eps_forward = earnings.future_eps
 rev_actual  = request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ", ignore_invalid_symbol = true)
 rev_forward = earnings.future_revenue
-
-var array<float> eps_hist      = array.new_float(0)
-var array<int>   eps_hist_time = array.new_int(0)
-eps_new = not na(eps_actual) and (na(eps_actual[1]) or eps_actual != eps_actual[1])
-if eps_new
-    array.unshift(eps_hist, eps_actual)
-    array.unshift(eps_hist_time, time)
-    if array.size(eps_hist) > 6
-        array.pop(eps_hist)
-        array.pop(eps_hist_time)
-
-var array<float> rev_hist = array.new_float(0)
-rev_new = not na(rev_actual) and (na(rev_actual[1]) or rev_actual != rev_actual[1])
-if rev_new
-    array.unshift(rev_hist, rev_actual)
-    if array.size(rev_hist) > 6
-        array.pop(rev_hist)
 
 // Net margin — TradingView provides this as its own field (NET_MARGIN) rather
 // than net income and revenue needing to be fetched and divided separately.
@@ -99,11 +92,21 @@ if rev_new
 // a real data gap, not a bug.
 net_margin = request.financial(syminfo.tickerid, "NET_MARGIN", "FQ", ignore_invalid_symbol = true)
 
-var array<float> margin_hist = array.new_float(0)
-margin_new = not na(net_margin) and (na(net_margin[1]) or net_margin != net_margin[1])
-if margin_new
+var array<float> eps_hist      = array.new_float(0)
+var array<int>   eps_hist_time = array.new_int(0)
+var array<float> rev_hist      = array.new_float(0)
+var array<float> margin_hist   = array.new_float(0)
+
+eps_new = not na(eps_actual)
+if eps_new
+    array.unshift(eps_hist, eps_actual)
+    array.unshift(eps_hist_time, time)
+    array.unshift(rev_hist, rev_actual)
     array.unshift(margin_hist, net_margin)
-    if array.size(margin_hist) > 6
+    if array.size(eps_hist) > 6
+        array.pop(eps_hist)
+        array.pop(eps_hist_time)
+        array.pop(rev_hist)
         array.pop(margin_hist)
 
 // Returns [QoQ growth %, color] for history index i (0 = latest). na/white if
@@ -205,6 +208,16 @@ fmtDecimal(float v) =>
         else
             s := str.tostring(v, "#.##")
     s
+
+// Value read for history index i (0 = latest); na if that slot isn't filled yet.
+histVal(array<float> hist, int i) =>
+    array.size(hist) > i ? array.get(hist, i) : float(na)
+
+// EPS / Sales cells read "value (growth%)", e.g. "1.25 (35%)" / "12.4B (28%)". No value at all
+// is "N/A"; a value without a prior quarter to compare against shows "(N/A)" for the growth.
+growthStr(float g) => na(g) ? "N/A" : str.tostring(g, "0") + "%"
+epsCell(float v, float g)   => na(v) ? "N/A" : str.tostring(v, "0.00") + " (" + growthStr(g) + ")"
+salesCell(float v, float g) => na(v) ? "N/A" : fmtDecimal(v) + " (" + growthStr(g) + ")"
 
 //----------------------------------------------------------------------------------------------------------------------------------------
 // Plot MAs at the global scope
@@ -377,29 +390,29 @@ if show_earnings_table and barstate.islast and (timeframe.isdaily or timeframe.i
     // Forward — estimate for the next, not-yet-reported quarter. No forward
     // margin field exists on TradingView, so that cell is always N/A.
     table.cell(earnTable, 0, 1, "Fwd", text_color = color.white, text_size = tableSize)
-    table.cell(earnTable, 1, 1, na(eps_fwd_growth) ? "N/A" : str.tostring(eps_fwd_growth, "0") + "%", text_color = eps_fwd_color, text_size = tableSize)
-    table.cell(earnTable, 2, 1, na(rev_fwd_growth) ? "N/A" : str.tostring(rev_fwd_growth, "0") + "%", text_color = rev_fwd_color, text_size = tableSize)
+    table.cell(earnTable, 1, 1, epsCell(eps_forward, eps_fwd_growth), text_color = eps_fwd_color, text_size = tableSize)
+    table.cell(earnTable, 2, 1, salesCell(rev_forward, rev_fwd_growth), text_color = rev_fwd_color, text_size = tableSize)
     table.cell(earnTable, 3, 1, "N/A", text_color = color.white, text_size = tableSize)
 
     // Latest reported quarter through 3 quarters back
     table.cell(earnTable, 0, 2, rowLabel(eps_hist_time, 0), text_color = color.white, text_size = tableSize)
-    table.cell(earnTable, 1, 2, na(eps_g0) ? "N/A" : str.tostring(eps_g0, "0") + "%", text_color = eps_c0, text_size = tableSize)
-    table.cell(earnTable, 2, 2, na(rev_g0) ? "N/A" : str.tostring(rev_g0, "0") + "%", text_color = rev_c0, text_size = tableSize)
+    table.cell(earnTable, 1, 2, epsCell(histVal(eps_hist, 0), eps_g0), text_color = eps_c0, text_size = tableSize)
+    table.cell(earnTable, 2, 2, salesCell(histVal(rev_hist, 0), rev_g0), text_color = rev_c0, text_size = tableSize)
     table.cell(earnTable, 3, 2, na(margin_v0) ? "N/A" : str.tostring(margin_v0, "0") + "%", text_color = margin_c0, text_size = tableSize)
 
     table.cell(earnTable, 0, 3, rowLabel(eps_hist_time, 1), text_color = color.white, text_size = tableSize)
-    table.cell(earnTable, 1, 3, na(eps_g1) ? "N/A" : str.tostring(eps_g1, "0") + "%", text_color = eps_c1, text_size = tableSize)
-    table.cell(earnTable, 2, 3, na(rev_g1) ? "N/A" : str.tostring(rev_g1, "0") + "%", text_color = rev_c1, text_size = tableSize)
+    table.cell(earnTable, 1, 3, epsCell(histVal(eps_hist, 1), eps_g1), text_color = eps_c1, text_size = tableSize)
+    table.cell(earnTable, 2, 3, salesCell(histVal(rev_hist, 1), rev_g1), text_color = rev_c1, text_size = tableSize)
     table.cell(earnTable, 3, 3, na(margin_v1) ? "N/A" : str.tostring(margin_v1, "0") + "%", text_color = margin_c1, text_size = tableSize)
 
     table.cell(earnTable, 0, 4, rowLabel(eps_hist_time, 2), text_color = color.white, text_size = tableSize)
-    table.cell(earnTable, 1, 4, na(eps_g2) ? "N/A" : str.tostring(eps_g2, "0") + "%", text_color = eps_c2, text_size = tableSize)
-    table.cell(earnTable, 2, 4, na(rev_g2) ? "N/A" : str.tostring(rev_g2, "0") + "%", text_color = rev_c2, text_size = tableSize)
+    table.cell(earnTable, 1, 4, epsCell(histVal(eps_hist, 2), eps_g2), text_color = eps_c2, text_size = tableSize)
+    table.cell(earnTable, 2, 4, salesCell(histVal(rev_hist, 2), rev_g2), text_color = rev_c2, text_size = tableSize)
     table.cell(earnTable, 3, 4, na(margin_v2) ? "N/A" : str.tostring(margin_v2, "0") + "%", text_color = margin_c2, text_size = tableSize)
 
     table.cell(earnTable, 0, 5, rowLabel(eps_hist_time, 3), text_color = color.white, text_size = tableSize)
-    table.cell(earnTable, 1, 5, na(eps_g3) ? "N/A" : str.tostring(eps_g3, "0") + "%", text_color = eps_c3, text_size = tableSize)
-    table.cell(earnTable, 2, 5, na(rev_g3) ? "N/A" : str.tostring(rev_g3, "0") + "%", text_color = rev_c3, text_size = tableSize)
+    table.cell(earnTable, 1, 5, epsCell(histVal(eps_hist, 3), eps_g3), text_color = eps_c3, text_size = tableSize)
+    table.cell(earnTable, 2, 5, salesCell(histVal(rev_hist, 3), rev_g3), text_color = rev_c3, text_size = tableSize)
     table.cell(earnTable, 3, 5, na(margin_v3) ? "N/A" : str.tostring(margin_v3, "0") + "%", text_color = margin_c3, text_size = tableSize)
 
     for earnRow = 0 to 5
