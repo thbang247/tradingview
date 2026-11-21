@@ -10,19 +10,11 @@ align_txt_right = text.align_right
 // === Inputs: Lookback Periods ===
 lookback_period_d = input.int(260, "52-Week Lookback (days)",  group = "Lookback")
 lookback_period_w = input.int(52,  "52-Week Lookback (weeks)", group = "Lookback")
-// Reserved: kept so saved indicator settings stay aligned. The MA-distance
-// histogram it fed was removed (see note below) and nothing reads it today.
-lookback_dist     = input.int(21,  "MA Distance Lookback",     group = "Lookback")
 
 // === Inputs: RS Calculation ===
 instrument_comparison = input.symbol("SPY", "Comparison Instrument",        group = "RS")
 rs_lookback_length    = input.int(50,       "RS Look-back Length", minval=1, group = "RS")
 rs_atr_length         = input.int(20,       "RS ATR Length",                group = "RS")
-
-// Reserved: fed the removed RS Bullish Divergence. Kept declared because deleting
-// a mid-list input shifts the saved values of every input after it — here that
-// would silently move your ADR Length and Nasdaq scales onto the wrong slots.
-rs_div_lookback       = input.int(20,       "(unused) RS Divergence Lookback", group = "RS")
 
 // === Inputs: ADR ===
 adr_length_input = input.int(14, "ADR Length", group = "ADR")
@@ -73,21 +65,31 @@ stats_move_thr1     = input.float(5.0,  "Move Threshold 1 (%)",  minval=0.1, ste
 stats_move_thr2     = input.float(10.0, "Move Threshold 2 (%)",  minval=0.1, step=0.5, group="Minute Stats")
 stats_measure       = input.string("Daily range (High-Low)", "Move Measure", options=["Daily range (High-Low)", "Close-to-close change"], group="Minute Stats")
 
-// === Inputs: 1-Month RS % ====================================================
-// Appended last, again, so no saved input position shifts.
-rs1m_lookback = input.int(25, "1M RS Lookback (completed daily bars)", minval=5, maxval=250, group="1M / 3M / 6M RS")
-rs1m_method   = input.string("Range position", "1M RS % Method", options=["Range position", "Percentile rank"], group="1M / 3M / 6M RS")
-// 3M / 6M reuse the method above. Appended after the 1M inputs, so still last.
-rs3m_lookback = input.int(63,  "3M RS Lookback (completed daily bars)", minval=10, maxval=500, group="1M / 3M / 6M RS")
-rs6m_lookback = input.int(126, "6M RS Lookback (completed daily bars)", minval=10, maxval=500, group="1M / 3M / 6M RS")
-// Master switch. Off = the ratio request below falls back to the chart's own symbol
-// (a request that is known to resolve) and the RS row is not drawn, so a
-// problem in the ratio symbol can be isolated without editing code.
-rs_show       = input.bool(true, "Show RS row (1M / 3M / 6M)", group="1M / 3M / 6M RS")
-// Color cutoffs for the RS cells, appended last. Green above the first, white from
-// the second up to the first, red below the second.
-rs_green_above = input.float(80, "RS Color: Green above (%)",        minval=0, maxval=100, group="1M / 3M / 6M RS")
-rs_white_from  = input.float(60, "RS Color: White from (%) - red below", minval=0, maxval=100, group="1M / 3M / 6M RS")
+// === Inputs: Stage ===========================================================
+// Same definitions as the "Swing: Stage" indicator (84 / 21 daily, 30 / 4 weekly).
+// The 52-week window for the base-vs-top test reuses the Lookback inputs above
+// (260 daily / 52 weekly). st_show switches the last table row on or off.
+st_show        = input.bool(true, "Show Stage row (last row of table)", group = "Stage")
+st_ma_len_d    = input.int(84,  "MA Length (Daily)",  minval = 2, group = "Stage")
+st_ma_len_w    = input.int(30,  "MA Length (Weekly)", minval = 2, group = "Stage")
+st_slope_len_d = input.int(21,  "Slope Lookback (Daily bars)",  minval = 1, group = "Stage")
+st_slope_len_w = input.int(4,   "Slope Lookback (Weekly bars)", minval = 1, group = "Stage")
+st_flat_thr_d  = input.float(0.30, "Flat Threshold, Daily (ADR)",  minval = 0.0, step = 0.05, group = "Stage")
+st_flat_thr_w  = input.float(0.15, "Flat Threshold, Weekly (ADR)", minval = 0.0, step = 0.05, group = "Stage")
+st_use_brk     = input.bool(true, "Early Stage 2 on Base Breakout", group = "Stage")
+st_base_len_d  = input.int(125, "Base Length (Daily bars, ~6 months)",  minval = 10, group = "Stage")
+st_base_len_w  = input.int(26,  "Base Length (Weekly bars, ~6 months)", minval = 5,  group = "Stage")
+st_early_win_d = input.int(60,  "Early Window (Daily bars)",  minval = 5, group = "Stage")
+st_early_win_w = input.int(12,  "Early Window (Weekly bars)", minval = 2, group = "Stage")
+// How long the BUY / SELL tag stays on the cell, counted in bars INCLUDING the
+// signal bar. 10 daily bars = two trading weeks, 2 weekly bars = the signal week
+// plus the next.
+st_sig_win_d   = input.int(10, "BUY / SELL Tag Window (Daily bars)",  minval = 1, group = "Stage")
+st_sig_win_w   = input.int(2,  "BUY / SELL Tag Window (Weekly bars)", minval = 1, group = "Stage")
+
+// Appended last so no saved input position shifts. Breadth dots turn red while the S&P 500
+// is within this many percent of its 52-week high (see the S&P 500 Breadth Ratio block).
+breadth_near_top_pct = input.float(5.0, "Breadth Dots Red When S&P 500 Within (% of 52-Week High)", minval = 0.0, step = 0.5, group = "Nasdaq")
 
 // =============================================================================
 // === Moving Averages =========================================================
@@ -224,15 +226,29 @@ sp_above_50  = request.security("S5FI", "D", close)
 sp_above_200 = request.security("S5TH", "D", close)
 breadth_ratio = sp_above_200 != 0 ? sp_above_50 / sp_above_200 : float(na)
 
-// Color now reflects the actual signal, not just which side of 1.0 the ratio
-// sits on: ratio < buy_threshold means short-term breadth has washed out well
-// below the long-term trend — a contrarian buy zone, stronger the lower it
-// goes, not simply "bad." Below buy_threshold overrides the plain above/
-// below-1 blue/orange split; at or above it, that split is all that's left to
-// go on, so it stays as the fallback.
-breadth_color = na(breadth_ratio) ? color.new(color.white, 60) : breadth_ratio < breadth_extreme_ratio ? #00ff7f : breadth_ratio < breadth_buy_ratio ? color.new(#2f9e4f, 30) : breadth_ratio >= 1 ? color.new(#3d8bfd, 60) : color.new(#ff9f43, 60)
+// Only the washed-out zone is drawn: ratio < breadth_buy_ratio means short-term breadth
+// has dropped well below the long-term trend — a contrarian buy zone, brighter the lower
+// it goes (bright below breadth_extreme_ratio, darker up to breadth_buy_ratio).
+// Everywhere else the plot is na. Dots rather than a step line; size is editable in the
+// Style tab.
+//
+// Colour = where the INDEX is, not just the breadth reading:
+//   green - S&P 500 more than breadth_near_top_pct below its 52-week high: breadth is
+//           washed out AND the index has already pulled back (the usual contrarian setup)
+//   red   - S&P 500 within breadth_near_top_pct of its 52-week high: breadth is washed out
+//           while the index is still near the top — weak participation under a strong
+//           index, so the same dot is a warning rather than a buy zone
+// The index's own daily bars are used (SPX, daily), so the distance does not depend on
+// the stock on the chart. 52-week = lookback_period_d daily bars, the same window as the
+// stock's "Off" row. Plotted on daily charts only (nq_hide), so the daily window is right.
+spx_off_high_pct = request.security("SPX", "D", (ta.highest(high, lookback_period_d) - close) / ta.highest(high, lookback_period_d) * 100)
+spx_near_top     = not na(spx_off_high_pct) and spx_off_high_pct < breadth_near_top_pct
 
-plot(nq_hide or na(breadth_ratio) ? na : (breadth_ratio - 1) * breadth_scale, title="S&P 500 Breadth Ratio (50MA/200MA)", style=plot.style_stepline, color=breadth_color)
+breadth_in_zone = not na(breadth_ratio) and breadth_ratio < breadth_buy_ratio
+breadth_extreme = breadth_ratio < breadth_extreme_ratio
+breadth_color   = spx_near_top ? (breadth_extreme ? #ff4d4d : color.new(#c0392b, 30)) : (breadth_extreme ? #00ff7f : color.new(#2f9e4f, 30))
+
+plot(nq_hide or not breadth_in_zone ? na : (breadth_ratio - 1) * breadth_scale, title="S&P 500 Breadth Ratio (50MA/200MA)", style=plot.style_circles, linewidth=2, color=breadth_color)
 
 // =============================================================================
 // === RS Plots ================================================================
@@ -386,56 +402,109 @@ v50adr_full_scale  = v50adr_baseline * adr_red_mult
 v50adr_color       = na(v50adr_baseline) ? color.white : math.abs(v50adr) > v50adr_full_scale * adr_green_pct ? color.red : color.green
 dist2_50ma_p_color = v50adr_color
 
-// 1 / 3 / 6-Month RS % --------------------------------------------------------
-// Educated reconstruction of the "1-Mth RS %" column in Jeff Sun's RS sheet; his
-// exact formula is not public, so treat this as a best guess, not a copy. The
-// same formula runs over three window lengths.
-//   RS      = stock close / comparison-instrument close, per DAILY bar (plain price
-//             ratio, the same `=E2/E$2` his tutorial uses — no ATR normalisation,
-//             that is a different measure from the `rs` line plotted above)
-//   Window  = last N completed daily bars. Defaults: 1M = 25 (his tutorial charts
-//             ~25 points), 3M = 63, 6M = 126 (usual trading-day counts)
-//   Range position : (RS - window low) / (window high - window low) * 100
-//                    100% = RS sits at its N-bar high, 0% = at its low
-//   Percentile rank: share of the window's days with RS at or below the latest
-//                    (ta.percentrank), 100% = highest RS in the window
-// The ratio is requested as a "SYMBOL/COMPARISON" expression symbol on the daily
-// timeframe, so the same daily bars are used on a minute chart as on a daily one,
-// and the two symbols' sessions are lined up by TradingView, not by hand. One
-// request returns all three windows.
-// Lagged one daily bar with lookahead_on (the non-repainting form): the in-progress
-// day is excluded, matching "last done daily RS".
-f_rs_win(int n, bool pctl) =>
-    hi  = ta.highest(close, n)
-    lo  = ta.lowest(close, n)
-    pos = hi > lo ? (close - lo) / (hi - lo) * 100 : float(na)
-    prk = ta.percentrank(close, n - 1)
-    pctl ? prk : pos
+// =============================================================================
+// === Weinstein Stage (last table row) ========================================
+// =============================================================================
+// Same logic as the "Swing: Stage" indicator; see its header for the full reasoning.
+// Replaces the old 1M / 3M / 6M RS % row (and its RS-ratio request).
+//
+//   LAYER 1 - slope stage. MA slope over the lookback, in ADR units (the ADR above),
+//     against a flat band; price side decides the rest:
+//       MA rising  + price above -> 2 Advancing     MA falling + price below -> 4 Declining
+//       MA rising  + price below -> 3 Topping       MA falling + price above -> 1 Basing
+//       MA flat                  -> 3 if the 52-week high is more recent than the low, else 1
+//   LAYER 2 - base breakout. First close above the prior base_len-bar high, price above
+//     the MA, MA not yet decisively rising -> called Stage 2 early ("2 Early") until the
+//     slope takes over, a close falls back under the broken level, or the window runs out.
+//   No volume test, by decision.
+//
+// Daily and weekly only: the stage MA is a 84-day / 30-week average, so on a minute or
+// monthly chart the stage is na and the cell reads "n/a". There is no short-history
+// fallback - a 10-bar "84MA" on a new IPO is not a stage MA.
+//
+// All ta.* run at global scope (ta.* inside barstate.islast returns na).
+st_is_wk = timeframe.isweekly
+st_tf_ok = timeframe.isdaily or timeframe.isweekly
 
-f_rs_multi(int n1, int n2, int n3, bool pctl) =>
-    r1 = f_rs_win(n1, pctl)
-    r2 = f_rs_win(n2, pctl)
-    r3 = f_rs_win(n3, pctl)
-    [r1[1], r2[1], r3[1]]
+st_ma_len    = st_is_wk ? st_ma_len_w    : st_ma_len_d
+st_slope_len = st_is_wk ? st_slope_len_w : st_slope_len_d
+st_flat_lim  = st_is_wk ? st_flat_thr_w  : st_flat_thr_d
+st_base_len  = st_is_wk ? st_base_len_w  : st_base_len_d
+st_early_win = st_is_wk ? st_early_win_w : st_early_win_d
+st_sig_win   = st_is_wk ? st_sig_win_w   : st_sig_win_d
 
-// Symbol is built from prefix:ticker, NOT syminfo.tickerid: tickerid can carry
-// encoded chart settings (extended session, adjustment) and appending "/SPY" to
-// that string yields an invalid symbol, which kills the whole script at runtime.
-rs_symbol = rs_show ? syminfo.prefix + ":" + syminfo.ticker + "/" + instrument_comparison : syminfo.tickerid
+st_ma = ta.sma(close, st_ma_len)
 
-[rs_1m_pct, rs_3m_pct, rs_6m_pct] = request.security(rs_symbol, "D", f_rs_multi(rs1m_lookback, rs3m_lookback, rs6m_lookback, rs1m_method == "Percentile rank"), lookahead = barmerge.lookahead_on)
+// Slope in ADRs. adr_ok guards a zero ADR (halted names) against +/-inf.
+st_slope = adr_ok ? (st_ma - st_ma[st_slope_len]) / adr : float(na)
 
-// RS cell color. Judged on the value as DISPLAYED (rounded to a whole percent), so a
-// cell reading "80%" never turns green off a hidden 80.4. Exactly on the lower
-// cutoff counts as white ("white if > 60", red only when smaller). na stays white.
-f_rs_color(float v) =>
-    r = math.round(v)
-    na(v) ? color.white : r > rs_green_above ? color.green : r >= rs_white_from ? color.white : color.red
+// Offsets to the 52-week extremes: 0 = this bar, more negative = further back, so
+// "greater" means "more recent". lookback_period is already 260 daily / 52 weekly.
+st_hi_bar = ta.highestbars(high, lookback_period)
+st_lo_bar = ta.lowestbars(low,  lookback_period)
+
+st_above = close > st_ma
+
+int st_slope_stage = na
+if st_tf_ok and not na(st_slope)
+    if st_slope > st_flat_lim
+        st_slope_stage := st_above ? 2 : 3
+    else if st_slope < -st_flat_lim
+        st_slope_stage := st_above ? 1 : 4
+    else if not na(st_hi_bar) and not na(st_lo_bar)
+        st_slope_stage := st_hi_bar > st_lo_bar ? 3 : 1
+
+// Resistance = highest high of the PRIOR base_len bars (the [1] stops a bar from being
+// "above" a level it just set).
+st_res    = ta.highest(high, st_base_len)[1]
+st_broke  = close > st_res
+st_pre_ok = not na(st_slope[1]) and st_slope[1] <= st_flat_lim
+
+st_brk_event = st_use_brk and st_tf_ok and st_broke and not st_broke[1] and st_pre_ok and st_above
+
+// The broken level is remembered while the breakout is still "early".
+var float st_brk_level = na
+var int   st_brk_bar   = na
+
+if st_brk_event
+    st_brk_level := st_res
+    st_brk_bar   := bar_index
+else if not na(st_brk_level)
+    if close < st_brk_level or st_slope_stage == 2 or bar_index - st_brk_bar > st_early_win
+        st_brk_level := na
+
+st_early_only = not na(st_brk_level) and st_slope_stage != 2
+
+int stage = st_slope_stage
+if st_early_only
+    stage := 2
+
+// BUY / SELL tag. Same events as the red / green crosses in "Swing: Stage":
+//   BUY  - the effective stage BECOMES 2 (a breakout lands here first; the later slope
+//          hand-over does not re-fire, because the stage stays 2)
+//   SELL - the effective stage LEAVES 2 (a failed early breakout counts)
+// A single-bar event read only on the last bar would almost always be blank, so the tag
+// is held for st_sig_win bars including the signal bar. The Stage text is always there;
+// only the tag comes and goes.
+st_enter2 = stage == 2 and not na(stage[1]) and stage[1] != 2
+st_leave2 = stage[1] == 2 and not na(stage) and stage != 2
+
+st_since_enter = ta.barssince(st_enter2)
+st_since_leave = ta.barssince(st_leave2)
+
+st_buy  = stage == 2 and not na(st_since_enter) and st_since_enter < st_sig_win
+st_sell = not na(stage) and stage != 2 and not na(st_since_leave) and st_since_leave < st_sig_win
+
+st_name = stage == 1 ? "1 Basing" : stage == 2 ? (st_early_only ? "2 Early" : "2 Advancing") : stage == 3 ? "3 Topping" : stage == 4 ? "4 Declining" : "n/a"
+st_text = st_name + (st_buy ? "  ▲ BUY" : st_sell ? "  ▼ SELL" : "")
+
+// Green = the only stage worth buying, yellow = caution, red = declining, white = basing / n/a.
+st_color = stage == 2 ? color.green : stage == 3 ? color.yellow : stage == 4 ? color.red : color.white
 
 // Sized to what is actually written: columns 1-4, five rows. (The original 6x22
 // allocation was pure over-allocation, not a visual artifact — unset cells are
-// not rendered, so those empty rows drew nothing.) The fifth row is RS: 1M / 3M /
-// 6M in columns 2 / 3 / 4.
+// not rendered, so those empty rows drew nothing.) The fifth row is the Stage row:
+// label in column 1, the stage and its BUY / SELL tag in one merged cell over 2-4.
 var data_table = table.new(position.top_right, 5, 5, bgcolor=color.new(color.black, 90), border_width=1, border_color=color.white)
 
 // Table now renders on every timeframe, including minute charts. It previously
@@ -473,13 +542,6 @@ if barstate.islast
     table.cell(data_table, 4, row_num, str.tostring(v50adr, "0.00"), text_color=v50adr_color, text_size=size_tbl)
     row_num := row_num + 1
 
-    // --- RS: 1M / 3M / 6M in columns 2 / 3 / 4 (daily close / comparison close, completed days) ---
-    if rs_show
-        table.cell(data_table, 1, row_num, "RS", text_color=color.white, text_size=size_tbl)
-        table.cell(data_table, 2, row_num, na(rs_1m_pct) ? "N/A" : str.tostring(rs_1m_pct, "0") + "%", text_color=f_rs_color(rs_1m_pct), text_size=size_tbl)
-        table.cell(data_table, 3, row_num, na(rs_3m_pct) ? "N/A" : str.tostring(rs_3m_pct, "0") + "%", text_color=f_rs_color(rs_3m_pct), text_size=size_tbl)
-        table.cell(data_table, 4, row_num, na(rs_6m_pct) ? "N/A" : str.tostring(rs_6m_pct, "0") + "%", text_color=f_rs_color(rs_6m_pct), text_size=size_tbl)
-
     // Uniform alignment: label column left, all three numeric columns right, so a
     // single column reads straight down. Previously set per row and inconsistently
     // — col 2 was right-aligned on the MA rows but default on the Off row, col 3
@@ -490,13 +552,17 @@ if barstate.islast
         table.cell_set_text_halign(data_table, 3, r, text_halign=align_txt_right)
         table.cell_set_text_halign(data_table, 4, r, text_halign=align_txt_right)
 
-    // The RS row (4) only exists when the switch is on (cell_set_text_halign errors on
-    // a cell that was never created), so it is aligned on its own, outside the loop above.
-    if rs_show
-        table.cell_set_text_halign(data_table, 1, 4, text_halign=align_txt_left)
-        table.cell_set_text_halign(data_table, 2, 4, text_halign=align_txt_right)
-        table.cell_set_text_halign(data_table, 3, 4, text_halign=align_txt_right)
-        table.cell_set_text_halign(data_table, 4, 4, text_halign=align_txt_right)
+    // --- Stage: label in column 1, one merged cell across columns 2-4 ---
+    // The row only exists when the switch is on. Cells 3 and 4 are created (empty) before
+    // the merge so the merge has real cells to join, and alignment is passed to
+    // table.cell itself because cell_set_text_halign errors on a cell never created.
+    // The merged cell takes its text, colour and alignment from its top-left cell (col 2).
+    if st_show
+        table.cell(data_table, 1, row_num, "Stage", text_color=color.white, text_size=size_tbl, text_halign=align_txt_left)
+        table.cell(data_table, 2, row_num, st_text, text_color=st_color, text_size=size_tbl, text_halign=align_txt_left)
+        table.cell(data_table, 3, row_num, "", text_size=size_tbl)
+        table.cell(data_table, 4, row_num, "", text_size=size_tbl)
+        table.merge_cells(data_table, 2, row_num, 4, row_num)
 
 // =============================================================================
 // === Minute-Chart Day Stats Table ============================================
